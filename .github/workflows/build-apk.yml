@@ -12,6 +12,7 @@ on:
         type: choice
         default: android
         options: [android, windows]
+      permissions: { required: false, type: string, default: 'files,downloads' }
 jobs:
   build:
     runs-on: ${{ inputs.target == 'windows' && 'windows-latest' || 'ubuntu-latest' }}
@@ -35,6 +36,7 @@ jobs:
           APP_NAME: ${{ inputs.app_name }}
           PKG: ${{ inputs.package_name }}
           TARGET: ${{ inputs.target }}
+          PERMISSIONS: ${{ inputs.permissions }}
         run: |
           python - <<'PY'
           """Create an Android WebView or secure Windows Electron wrapper from build inputs."""
@@ -53,6 +55,9 @@ jobs:
           target = e.get("TARGET", "android")
           assert target in ("android", "windows")
           root = Path("app-src")
+          ALLOWED = ("files", "camera", "microphone", "location", "downloads")
+          perms = {x.strip() for x in e.get("PERMISSIONS", "files,downloads").split(",") if x.strip()}
+          assert perms <= set(ALLOWED)
           
           def write(path, content):
               path = Path(path)
@@ -114,10 +119,24 @@ jobs:
             implementation 'androidx.webkit:webkit:1.12.1'
           }}
           """)
+              mp = []
+              if "camera" in perms: mp += ['<uses-permission android:name="android.permission.CAMERA"/>', '<uses-feature android:name="android.hardware.camera" android:required="false"/>']
+              if "microphone" in perms: mp += ['<uses-permission android:name="android.permission.RECORD_AUDIO"/>', '<uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>']
+              if "location" in perms: mp += ['<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>', '<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>']
+              if "files" in perms: mp += ['<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>', '<uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>', '<uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>']
+              if "downloads" in perms: mp += ['<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>']
+              MANIFEST_PERMS = "\n".join("  " + x for x in mp)
+              runtime = []
+              if "camera" in perms: runtime.append("android.Manifest.permission.CAMERA")
+              if "microphone" in perms: runtime.append("android.Manifest.permission.RECORD_AUDIO")
+              if "location" in perms: runtime += ["android.Manifest.permission.ACCESS_FINE_LOCATION", "android.Manifest.permission.ACCESS_COARSE_LOCATION"]
+              RUNTIME = ", ".join(runtime)
+              FLAGS = f"static final boolean FILES = {str('files' in perms).lower()}, DOWNLOADS = {str('downloads' in perms).lower()}, LOCATION = {str('location' in perms).lower()}, MEDIA = {str('camera' in perms or 'microphone' in perms).lower()};"
               write(src / "AndroidManifest.xml", '''<?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
             <uses-permission android:name="android.permission.INTERNET"/>
             <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+          ''' + MANIFEST_PERMS + '''
             <application android:label="@string/app_name" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:usesCleartextTraffic="true" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:hardwareAccelerated="true">
               <activity android:name=".MainActivity" android:exported="true" android:configChanges="orientation|screenSize|keyboardHidden">
                 <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
@@ -149,12 +168,20 @@ jobs:
           import android.widget.FrameLayout; import android.widget.ImageView;
           import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
           import androidx.webkit.WebViewCompat; import androidx.webkit.WebViewFeature;
-          import java.util.Collections;
+          import java.util.Collections; import android.app.DownloadManager; import android.os.Environment; import android.webkit.URLUtil; import android.widget.Toast;
           public class MainActivity extends Activity {{
             static final String START = {json.dumps(url)};
             static final String VIEWPORT = {json.dumps(viewport)};
             WebView web; SwipeRefreshLayout swipe; ImageView previousPage; Bitmap snapshot;
             boolean committed = false;
+            {FLAGS}
+            static final String[] RUNTIME = new String[]{{ {RUNTIME} }};
+            ValueCallback<Uri[]> fileCallback;
+            @Override protected void onActivityResult(int req, int res, Intent data) {{
+              super.onActivityResult(req, res, data);
+              if (req == 7 && fileCallback != null) {{ fileCallback.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(res, data)); fileCallback = null; }}
+            }}
+            void openExternally(Uri u) {{ try {{ startActivity(new Intent(Intent.ACTION_VIEW, u)); }} catch (Exception ex) {{ Toast.makeText(this, "No app can open this file", Toast.LENGTH_SHORT).show(); }} }}
             static final String OFFLINE = "<html><head><meta name='viewport' content='width=device-width, initial-scale=1'></head><body style='font-family:sans-serif;text-align:center;padding-top:35%'><h2>No internet</h2><p>Check your connection and pull down to retry.</p></body></html>";
             void retainPage() {{
               if (!committed || previousPage.getVisibility() == View.VISIBLE || web.getWidth() == 0 || web.getHeight() == 0) return;
@@ -184,10 +211,36 @@ jobs:
               }}
               swipe.setOnChildScrollUpCallback((parent, child) -> web.canScrollVertically(-1));
               swipe.setOnRefreshListener(() -> {{ String u = web.getUrl(); if (u == null || u.startsWith("data:") || u.startsWith("about:")) web.loadUrl(START); else web.reload(); }});
-              web.setWebChromeClient(new WebChromeClient());
+              if (RUNTIME.length > 0 && android.os.Build.VERSION.SDK_INT >= 23) requestPermissions(RUNTIME, 1);
+              s.setGeolocationEnabled(LOCATION); s.setMediaPlaybackRequiresUserGesture(false);
+              s.setAllowFileAccess(FILES); s.setAllowContentAccess(FILES);
+              web.setDownloadListener((dUrl, ua, cd, mime, len) -> {{
+                String file = URLUtil.guessFileName(dUrl, cd, mime);
+                if (!DOWNLOADS || !(dUrl.startsWith("http://") || dUrl.startsWith("https://"))) {{ openExternally(Uri.parse(dUrl)); return; }}
+                try {{
+                  DownloadManager.Request q = new DownloadManager.Request(Uri.parse(dUrl));
+                  q.setMimeType(mime); q.addRequestHeader("Cookie", CookieManager.getInstance().getCookie(dUrl)); q.addRequestHeader("User-Agent", ua);
+                  q.setTitle(file); q.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+                  q.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, file);
+                  ((DownloadManager) getSystemService(DOWNLOAD_SERVICE)).enqueue(q);
+                  Toast.makeText(this, "Downloading " + file + " - tap the notification to open", Toast.LENGTH_LONG).show();
+                }} catch (Exception ex) {{ openExternally(Uri.parse(dUrl)); }}
+              }});
+              web.setWebChromeClient(new WebChromeClient() {{
+                @Override public boolean onShowFileChooser(WebView v, ValueCallback<Uri[]> cb, FileChooserParams params) {{
+                  if (!FILES) {{ cb.onReceiveValue(null); return true; }}
+                  if (fileCallback != null) fileCallback.onReceiveValue(null);
+                  fileCallback = cb;
+                  try {{ startActivityForResult(params.createIntent(), 7); }} catch (Exception ex) {{ fileCallback = null; cb.onReceiveValue(null); return false; }}
+                  return true;
+                }}
+                @Override public void onPermissionRequest(PermissionRequest r) {{ if (MEDIA) r.grant(r.getResources()); else r.deny(); }}
+                @Override public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback cb) {{ cb.invoke(origin, LOCATION, false); }}
+              }});
               web.setWebViewClient(new WebViewClient() {{
                 @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {{
                   Uri u = r.getUrl(); String scheme = u.getScheme();
+                  if (("http".equals(scheme) || "https".equals(scheme)) && u.getPath() != null && u.getPath().toLowerCase().endsWith(".pdf")) {{ openExternally(u); return true; }}
                   if ("http".equals(scheme) || "https".equals(scheme)) {{ if (r.isForMainFrame()) retainPage(); return false; }}
                   if ("tel".equals(scheme) || "mailto".equals(scheme) || "whatsapp".equals(scheme) || "sms".equals(scheme)) {{
                     try {{ startActivity(new Intent(Intent.ACTION_VIEW, u)); }} catch (Exception ex) {{}}
