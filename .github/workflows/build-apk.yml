@@ -7,102 +7,231 @@ on:
       app_url: { required: true, type: string }
       app_name: { required: true, type: string }
       package_name: { required: true, type: string }
+      target:
+        required: false
+        type: choice
+        default: android
+        options: [android, windows]
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.target == 'windows' && 'windows-latest' || 'ubuntu-latest' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
+        if: inputs.target != 'windows'
         with: { distribution: temurin, java-version: "17" }
       - uses: gradle/actions/setup-gradle@v4
+        if: inputs.target != 'windows'
         with: { gradle-version: "8.7" }
-      - name: Create Android project
+      - uses: actions/setup-node@v4
+        if: inputs.target == 'windows'
+        with: { node-version: "22" }
+      - name: Create app project
+        shell: bash
         env:
           BUILD_ID: ${{ inputs.build_id }}
           APP_URL: ${{ inputs.app_url }}
           APP_NAME: ${{ inputs.app_name }}
           PKG: ${{ inputs.package_name }}
+          TARGET: ${{ inputs.target }}
         run: |
-          python3 - <<'PY'
-          import os, re, json, shutil, html
+          python - <<'PY'
+          """Create an Android WebView or secure Windows Electron wrapper from build inputs."""
+          import os
+          import re
+          import json
+          import shutil
+          import html
+          from pathlib import Path
+          
           e = os.environ
           pkg = e["PKG"]
           assert re.fullmatch(r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+", pkg)
-          url = e["APP_URL"]; assert url.startswith("https://") or url.startswith("http://")
-          name = html.escape(e["APP_NAME"]).replace("'", "\\'")
-          host = re.sub(r"^https?://", "", url).split("/")[0]
-          root = "app-src"; src = f"{root}/app/src/main"
-          jdir = f"{src}/java/" + pkg.replace(".", "/")
-          for d in [jdir, f"{src}/res/mipmap-xxxhdpi", f"{src}/res/values"]:
-              os.makedirs(d, exist_ok=True)
-          def w(p, s): open(p, "w").write(s)
-          w(f"{root}/settings.gradle", """pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          url = e["APP_URL"]
+          assert url.startswith("https://") or url.startswith("http://")
+          target = e.get("TARGET", "android")
+          assert target in ("android", "windows")
+          root = Path("app-src")
+          
+          def write(path, content):
+              path = Path(path)
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_text(content, encoding="utf-8")
+          
+          if target == "windows":
+              write(root / "package.json", json.dumps({
+                  "name": "website-app", "version": "1.0.0", "main": "main.cjs",
+                  "devDependencies": {"electron": "40.0.0", "@electron/packager": "18.3.6"}
+              }))
+              write(root / "config.json", json.dumps({"url": url, "name": e["APP_NAME"]}))
+              shutil.copyfile(f"icons/{e['BUILD_ID']}.png", root / "icon.png")
+              write(root / "main.cjs", '''const { app, BrowserWindow, shell } = require('electron');
+          const path = require('node:path');
+          const config = require('./config.json');
+          function openExternal(url) {
+            try {
+              if (['https:', 'http:', 'mailto:', 'tel:'].includes(new URL(url).protocol)) shell.openExternal(url);
+            } catch {}
+          }
+          function createWindow() {
+            const window = new BrowserWindow({
+              title: config.name, width: 1200, height: 800, minWidth: 360, minHeight: 480,
+              show: false, autoHideMenuBar: true, icon: path.join(__dirname, 'icon.png'),
+              webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true }
+            });
+            window.webContents.setWindowOpenHandler(({ url }) => { openExternal(url); return { action: 'deny' }; });
+            window.webContents.on('will-navigate', (event, url) => {
+              try { if (!['http:', 'https:'].includes(new URL(url).protocol)) { event.preventDefault(); openExternal(url); } }
+              catch { event.preventDefault(); }
+            });
+            window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+            window.once('ready-to-show', () => window.show());
+            window.loadURL(config.url);
+          }
+          app.whenReady().then(createWindow);
+          app.on('window-all-closed', () => app.quit());
+          ''')
+          else:
+              src = root / "app/src/main"
+              jdir = src / "java" / pkg.replace(".", "/")
+              write(root / "settings.gradle", """pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
           dependencyResolutionManagement { repositories { google(); mavenCentral() } }
           rootProject.name = 'webapp'
           include ':app'
           """)
-          w(f"{root}/build.gradle", "plugins { id 'com.android.application' version '8.5.0' apply false }\n")
-          w(f"{root}/gradle.properties", "android.useAndroidX=true\norg.gradle.jvmargs=-Xmx2g\n")
-          w(f"{root}/app/build.gradle", f"""plugins {{ id 'com.android.application' }}
+              write(root / "build.gradle", "plugins { id 'com.android.application' version '8.5.0' apply false }\n")
+              write(root / "gradle.properties", "android.useAndroidX=true\norg.gradle.jvmargs=-Xmx2g\n")
+              write(root / "app/build.gradle", f"""plugins {{ id 'com.android.application' }}
           android {{
             namespace '{pkg}'
-            compileSdk 34
-            defaultConfig {{ applicationId '{pkg}'; minSdk 21; targetSdk 34; versionCode 1; versionName '1.0' }}
+            compileSdk 35
+            defaultConfig {{ applicationId '{pkg}'; minSdk 23; targetSdk 35; versionCode 2; versionName '2.0' }}
             compileOptions {{ sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }}
           }}
-          dependencies {{ implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0' }}
+          dependencies {{
+            implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
+            implementation 'androidx.webkit:webkit:1.12.1'
+          }}
           """)
-          w(f"{src}/AndroidManifest.xml", """<?xml version="1.0" encoding="utf-8"?>
+              write(src / "AndroidManifest.xml", '''<?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
             <uses-permission android:name="android.permission.INTERNET"/>
             <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
-            <application android:label="@string/app_name" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:usesCleartextTraffic="true" android:theme="@android:style/Theme.Material.Light.NoActionBar">
+            <application android:label="@string/app_name" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:usesCleartextTraffic="true" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:hardwareAccelerated="true">
               <activity android:name=".MainActivity" android:exported="true" android:configChanges="orientation|screenSize|keyboardHidden">
                 <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
               </activity>
             </application>
           </manifest>
-          """)
-          w(f"{src}/res/values/strings.xml", f'<resources><string name="app_name">{name}</string></resources>\n')
-          shutil.copy(f"icons/{e['BUILD_ID']}.png", f"{src}/res/mipmap-xxxhdpi/ic_launcher.png")
-          w(f"{jdir}/MainActivity.java", f"""package {pkg};
+          ''')
+              name = html.escape(e["APP_NAME"]).replace("'", "\\'").replace('"', '\\"')
+              write(src / "res/values/strings.xml", f'<resources><string name="app_name">{name}</string></resources>\n')
+              icon = src / "res/mipmap-xxxhdpi/ic_launcher.png"
+              icon.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copyfile(f"icons/{e['BUILD_ID']}.png", icon)
+              # Run before site JavaScript where the installed WebView supports it; no CSS
+              # overrides or loader removal, which could break website interactions.
+              viewport = """(() => {
+                const apply = () => {
+                  if (!document.head) return;
+                  let meta = document.querySelector('meta[name="viewport"]');
+                  if (!meta) { meta = document.createElement('meta'); meta.name = 'viewport'; document.head.appendChild(meta); }
+                  const value = 'width=device-width, initial-scale=1, viewport-fit=cover';
+                  if (meta.content !== value) meta.content = value;
+                };
+                new MutationObserver(apply).observe(document, {childList:true, subtree:true, attributes:true, attributeFilter:['content']});
+                apply();
+              })();"""
+              write(jdir / "MainActivity.java", f'''package {pkg};
           import android.app.Activity; import android.content.Intent; import android.net.Uri; import android.os.Bundle;
-          import android.webkit.*; import android.graphics.Bitmap; import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
+          import android.webkit.*; import android.graphics.Bitmap; import android.graphics.Canvas; import android.view.View;
+          import android.widget.FrameLayout; import android.widget.ImageView;
+          import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
+          import androidx.webkit.WebViewCompat; import androidx.webkit.WebViewFeature;
+          import java.util.Collections;
           public class MainActivity extends Activity {{
-            static final String START = {json.dumps(url)}; static final String HOST = {json.dumps(host)};
-            WebView web; SwipeRefreshLayout swipe;
-            static final String OFFLINE = "<html><body style='font-family:sans-serif;text-align:center;padding-top:40%'><h2>No internet</h2><p>Check your connection and pull down to retry.</p></body></html>";
+            static final String START = {json.dumps(url)};
+            static final String VIEWPORT = {json.dumps(viewport)};
+            WebView web; SwipeRefreshLayout swipe; ImageView previousPage; Bitmap snapshot;
+            boolean committed = false;
+            static final String OFFLINE = "<html><head><meta name='viewport' content='width=device-width, initial-scale=1'></head><body style='font-family:sans-serif;text-align:center;padding-top:35%'><h2>No internet</h2><p>Check your connection and pull down to retry.</p></body></html>";
+            void retainPage() {{
+              if (!committed || previousPage.getVisibility() == View.VISIBLE || web.getWidth() == 0 || web.getHeight() == 0) return;
+              snapshot = Bitmap.createBitmap(web.getWidth(), web.getHeight(), Bitmap.Config.ARGB_8888);
+              web.draw(new Canvas(snapshot)); previousPage.setImageBitmap(snapshot); previousPage.setVisibility(View.VISIBLE);
+            }}
+            void revealPage() {{
+              previousPage.setVisibility(View.GONE); previousPage.setImageDrawable(null);
+              if (snapshot != null) {{ snapshot.recycle(); snapshot = null; }}
+              committed = true; swipe.setRefreshing(false);
+            }}
             @Override protected void onCreate(Bundle b) {{
               super.onCreate(b);
-              swipe = new SwipeRefreshLayout(this); web = new WebView(this); swipe.addView(web); setContentView(swipe);
-              WebSettings s = web.getSettings(); s.setJavaScriptEnabled(true); s.setDomStorageEnabled(true); s.setDatabaseEnabled(true); s.setLoadWithOverviewMode(true); s.setUseWideViewPort(true);
+              FrameLayout frame = new FrameLayout(this);
+              swipe = new SwipeRefreshLayout(this); web = new WebView(this); swipe.addView(web);
+              previousPage = new ImageView(this); previousPage.setScaleType(ImageView.ScaleType.FIT_XY); previousPage.setVisibility(View.GONE);
+              previousPage.setClickable(true);
+              frame.addView(swipe, new FrameLayout.LayoutParams(-1, -1)); frame.addView(previousPage, new FrameLayout.LayoutParams(-1, -1)); setContentView(frame);
+              // Keep content clear of system bars, including Android 15 edge-to-edge enforcement.
+              frame.setOnApplyWindowInsetsListener((v, insets) -> {{ v.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(), insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom()); return insets.consumeSystemWindowInsets(); }});
+              WebSettings s = web.getSettings(); s.setJavaScriptEnabled(true); s.setDomStorageEnabled(true);
+              s.setLoadWithOverviewMode(false); s.setUseWideViewPort(true); s.setTextZoom(100);
+              s.setCacheMode(WebSettings.LOAD_DEFAULT); s.setBuiltInZoomControls(true); s.setDisplayZoomControls(false);
+              CookieManager.getInstance().setAcceptCookie(true);
+              if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {{
+                WebViewCompat.addDocumentStartJavaScript(web, VIEWPORT, Collections.singleton("*"));
+              }}
+              swipe.setOnChildScrollUpCallback((parent, child) -> web.canScrollVertically(-1));
               swipe.setOnRefreshListener(() -> {{ String u = web.getUrl(); if (u == null || u.startsWith("data:") || u.startsWith("about:")) web.loadUrl(START); else web.reload(); }});
               web.setWebChromeClient(new WebChromeClient());
               web.setWebViewClient(new WebViewClient() {{
                 @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {{
-                  Uri u = r.getUrl(); String sc = u.getScheme();
-                  if (("http".equals(sc) || "https".equals(sc))) return false;
-                  try {{ startActivity(new Intent(Intent.ACTION_VIEW, u)); }} catch (Exception ex) {{}}
+                  Uri u = r.getUrl(); String scheme = u.getScheme();
+                  if ("http".equals(scheme) || "https".equals(scheme)) {{ if (r.isForMainFrame()) retainPage(); return false; }}
+                  if ("tel".equals(scheme) || "mailto".equals(scheme) || "whatsapp".equals(scheme) || "sms".equals(scheme)) {{
+                    try {{ startActivity(new Intent(Intent.ACTION_VIEW, u)); }} catch (Exception ex) {{}}
+                  }}
                   return true;
                 }}
-                @Override public void onPageFinished(WebView v, String u) {{ swipe.setRefreshing(false); }}
-                @Override public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError er) {{
-                  if (r.isForMainFrame()) v.loadDataWithBaseURL(null, OFFLINE, "text/html", "utf-8", null);
+                @Override public void onPageStarted(WebView v, String u, Bitmap favicon) {{ retainPage(); }}
+                @Override public void onPageCommitVisible(WebView v, String u) {{ revealPage(); }}
+                @Override public void onPageFinished(WebView v, String u) {{ v.evaluateJavascript(VIEWPORT, null); revealPage(); }}
+                @Override public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError error) {{
+                  if (r.isForMainFrame()) {{ revealPage(); v.loadDataWithBaseURL(null, OFFLINE, "text/html", "utf-8", null); }}
                 }}
               }});
-              if (b != null) web.restoreState(b); else web.loadUrl(START);
+              if (b != null && web.restoreState(b) != null) {{}} else web.loadUrl(START);
             }}
             @Override protected void onSaveInstanceState(Bundle o) {{ super.onSaveInstanceState(o); web.saveState(o); }}
-            @Override public void onBackPressed() {{ if (web.canGoBack()) web.goBack(); else super.onBackPressed(); }}
+            @Override public void onBackPressed() {{ if (web.canGoBack()) {{ retainPage(); web.goBack(); }} else super.onBackPressed(); }}
+            @Override protected void onDestroy() {{ revealPage(); web.destroy(); super.onDestroy(); }}
           }}
-          """)
+          ''')
           PY
-      - name: Build APK
+      - name: Build Android APK
+        if: inputs.target != 'windows'
         working-directory: app-src
         run: gradle assembleDebug --no-daemon
+      - name: Build Windows app
+        if: inputs.target == 'windows'
+        working-directory: app-src
+        shell: bash
+        run: |
+          python -m pip install Pillow==11.3.0
+          python -c "from PIL import Image; Image.open('icon.png').save('icon.ico', sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])"
+          npm install --no-audit --no-fund
+          npx electron-packager . WebsiteApp --platform=win32 --arch=x64 --out=release --overwrite --icon=icon.ico
+          python -c "import shutil; shutil.make_archive('windows-app', 'zip', 'release/WebsiteApp-win32-x64')"
       - uses: actions/upload-artifact@v4
+        if: inputs.target != 'windows'
         with:
           name: apk
           path: app-src/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        if: inputs.target == 'windows'
+        with:
+          name: windows
+          path: app-src/windows-app.zip
           retention-days: 7
