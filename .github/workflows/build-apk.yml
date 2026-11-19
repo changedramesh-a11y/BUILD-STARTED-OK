@@ -55,7 +55,7 @@ jobs:
           target = e.get("TARGET", "android")
           assert target in ("android", "windows")
           root = Path("app-src")
-          ALLOWED = ("files", "camera", "microphone", "location", "downloads")
+          ALLOWED = ("files", "camera", "microphone", "location", "downloads", "notifications")
           perms = {x.strip() for x in e.get("PERMISSIONS", "files,downloads").split(",") if x.strip()}
           assert perms <= set(ALLOWED)
           
@@ -125,13 +125,14 @@ jobs:
               if "location" in perms: mp += ['<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>', '<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>']
               if "files" in perms: mp += ['<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>', '<uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>', '<uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>']
               if "downloads" in perms: mp += ['<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>']
+              if "notifications" in perms: mp += ['<uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>']
               MANIFEST_PERMS = "\n".join("  " + x for x in mp)
               runtime = []
               if "camera" in perms: runtime.append("android.Manifest.permission.CAMERA")
               if "microphone" in perms: runtime.append("android.Manifest.permission.RECORD_AUDIO")
               if "location" in perms: runtime += ["android.Manifest.permission.ACCESS_FINE_LOCATION", "android.Manifest.permission.ACCESS_COARSE_LOCATION"]
               RUNTIME = ", ".join(runtime)
-              FLAGS = f"static final boolean FILES = {str('files' in perms).lower()}, DOWNLOADS = {str('downloads' in perms).lower()}, LOCATION = {str('location' in perms).lower()}, MEDIA = {str('camera' in perms or 'microphone' in perms).lower()};"
+              FLAGS = f"static final boolean FILES = {str('files' in perms).lower()}, DOWNLOADS = {str('downloads' in perms).lower()}, LOCATION = {str('location' in perms).lower()}, CAMERA = {str('camera' in perms).lower()}, MIC = {str('microphone' in perms).lower()}, NOTIFY = {str('notifications' in perms).lower()};"
               write(src / "AndroidManifest.xml", '''<?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
             <uses-permission android:name="android.permission.INTERNET"/>
@@ -162,24 +163,111 @@ jobs:
                 new MutationObserver(apply).observe(document, {childList:true, subtree:true, attributes:true, attributeFilter:['content']});
                 apply();
               })();"""
+              bridge = """(() => {
+                if (!window.W2A || window.__w2aReady) return; window.__w2aReady = true;
+                const N = function (title, opts) { W2A.notify(String(title || ''), String((opts && opts.body) || '')); };
+                Object.defineProperty(N, 'permission', { get: () => W2A.notifyPermission() });
+                N.requestPermission = (cb) => new Promise((res) => {
+                  window.__w2aNotifyCb = (v) => { res(v); if (typeof cb === 'function') cb(v); };
+                  W2A.requestNotify();
+                });
+                N.prototype.close = function () {};
+                window.Notification = N;
+              })();"""
               write(jdir / "MainActivity.java", f'''package {pkg};
           import android.app.Activity; import android.content.Intent; import android.net.Uri; import android.os.Bundle;
           import android.webkit.*; import android.graphics.Bitmap; import android.graphics.Canvas; import android.view.View;
           import android.widget.FrameLayout; import android.widget.ImageView;
           import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
           import androidx.webkit.WebViewCompat; import androidx.webkit.WebViewFeature;
-          import java.util.Collections; import android.app.DownloadManager; import android.os.Environment; import android.webkit.URLUtil; import android.widget.Toast;
+          import java.util.Collections; import java.util.ArrayList; import android.content.pm.PackageManager; import android.content.BroadcastReceiver; import android.content.Context; import android.content.IntentFilter; import android.app.NotificationManager; import android.app.NotificationChannel; import android.app.PendingIntent; import android.content.ContentValues; import android.provider.MediaStore; import android.util.Base64; import java.io.OutputStream; import android.app.DownloadManager; import android.os.Environment; import android.webkit.URLUtil; import android.widget.Toast;
           public class MainActivity extends Activity {{
             static final String START = {json.dumps(url)};
             static final String VIEWPORT = {json.dumps(viewport)};
+            static final String BRIDGE = {json.dumps(bridge)};
             WebView web; SwipeRefreshLayout swipe; ImageView previousPage; Bitmap snapshot;
             boolean committed = false;
             {FLAGS}
-            static final String[] RUNTIME = new String[]{{ {RUNTIME} }};
+            PermissionRequest pendingMedia; String pendingGeoOrigin; GeolocationPermissions.Callback pendingGeo; int notifyId = 1;
+            boolean has(String p) {{ return android.os.Build.VERSION.SDK_INT < 23 || checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED; }}
+            // Ask only when the website needs it (camera button, map, notification prompt).
+            @Override public void onRequestPermissionsResult(int code, String[] ps, int[] res) {{
+              if (code == 2 && pendingMedia != null) {{
+                ArrayList<String> ok = new ArrayList<>();
+                for (String r : pendingMedia.getResources()) {{
+                  if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(r) && has(android.Manifest.permission.CAMERA)) ok.add(r);
+                  if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(r) && has(android.Manifest.permission.RECORD_AUDIO)) ok.add(r);
+                }}
+                if (ok.isEmpty()) pendingMedia.deny(); else pendingMedia.grant(ok.toArray(new String[0]));
+                pendingMedia = null;
+              }} else if (code == 3 && pendingGeo != null) {{
+                pendingGeo.invoke(pendingGeoOrigin, has(android.Manifest.permission.ACCESS_FINE_LOCATION) || has(android.Manifest.permission.ACCESS_COARSE_LOCATION), false); pendingGeo = null;
+              }} else if (code == 4) {{
+                String v = notifyAllowed() ? "granted" : "denied";
+                web.evaluateJavascript("window.__w2aNotifyCb && window.__w2aNotifyCb('" + v + "')", null);
+              }}
+            }}
+            boolean notifyAllowed() {{ return NOTIFY && (android.os.Build.VERSION.SDK_INT < 33 || has("android.permission.POST_NOTIFICATIONS")); }}
+            class Bridge {{
+              @JavascriptInterface public String notifyPermission() {{ return !NOTIFY ? "denied" : notifyAllowed() ? "granted" : "default"; }}
+              @JavascriptInterface public void requestNotify() {{ runOnUiThread(() -> {{
+                if (notifyAllowed() || !NOTIFY || android.os.Build.VERSION.SDK_INT < 33) onRequestPermissionsResult(4, new String[0], new int[0]);
+                else requestPermissions(new String[]{{"android.permission.POST_NOTIFICATIONS"}}, 4);
+              }}); }}
+              @JavascriptInterface public void notify(String title, String body) {{ if (notifyAllowed()) runOnUiThread(() -> showNotification(title, body)); }}
+              @JavascriptInterface public void saveFile(String dataUrl, String name, String mime) {{ runOnUiThread(() -> saveDataUrl(dataUrl, name, mime)); }}
+            }}
+            void showNotification(String title, String body) {{
+              NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+              android.app.Notification.Builder nb;
+              if (android.os.Build.VERSION.SDK_INT >= 26) {{ nm.createNotificationChannel(new NotificationChannel("main", "Notifications", NotificationManager.IMPORTANCE_HIGH)); nb = new android.app.Notification.Builder(this, "main"); }}
+              else nb = new android.app.Notification.Builder(this);
+              Intent open = new Intent(this, MainActivity.class).setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+              nb.setSmallIcon(getApplicationInfo().icon).setContentTitle(title).setContentText(body).setAutoCancel(true)
+                .setContentIntent(PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE));
+              nm.notify(notifyId++, nb.build());
+            }}
+            void openFile(Uri u, String mime) {{
+              try {{ startActivity(new Intent(Intent.ACTION_VIEW).setDataAndType(u, mime).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK)); }}
+              catch (Exception ex) {{ Toast.makeText(this, "Saved to Downloads. No app can open this file.", Toast.LENGTH_LONG).show(); }}
+            }}
+            // Website-generated files (blob:/data: links) cannot go through DownloadManager.
+            void saveDataUrl(String dataUrl, String name, String mime) {{
+              try {{
+                int comma = dataUrl.indexOf(','); if (comma < 0) return;
+                String head = dataUrl.substring(0, comma);
+                if (mime == null || mime.isEmpty()) mime = head.startsWith("data:") && head.contains(";") ? head.substring(5, head.indexOf(';')) : "application/octet-stream";
+                byte[] bytes = head.contains(";base64") ? Base64.decode(dataUrl.substring(comma + 1), Base64.DEFAULT) : Uri.decode(dataUrl.substring(comma + 1)).getBytes("UTF-8");
+                if (android.os.Build.VERSION.SDK_INT >= 29) {{
+                  ContentValues cv = new ContentValues(); cv.put(MediaStore.Downloads.DISPLAY_NAME, name); cv.put(MediaStore.Downloads.MIME_TYPE, mime);
+                  Uri u = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv);
+                  try (OutputStream o = getContentResolver().openOutputStream(u)) {{ o.write(bytes); }}
+                  openFile(u, mime);
+                }} else {{
+                  java.io.File f = new java.io.File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), name);
+                  try (OutputStream o = new java.io.FileOutputStream(f)) {{ o.write(bytes); }}
+                  Toast.makeText(this, "Saved " + name + " to Downloads", Toast.LENGTH_LONG).show();
+                }}
+              }} catch (Exception ex) {{ Toast.makeText(this, "Could not save file", Toast.LENGTH_SHORT).show(); }}
+            }}
+            BroadcastReceiver downloadDone = new BroadcastReceiver() {{
+              @Override public void onReceive(Context c, Intent i) {{
+                long id = i.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1);
+                DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+                Uri u = dm.getUriForDownloadedFile(id); if (u != null) openFile(u, dm.getMimeTypeForDownloadedFile(id));
+              }}
+            }};
             ValueCallback<Uri[]> fileCallback;
             @Override protected void onActivityResult(int req, int res, Intent data) {{
               super.onActivityResult(req, res, data);
-              if (req == 7 && fileCallback != null) {{ fileCallback.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(res, data)); fileCallback = null; }}
+              if (req == 7 && fileCallback != null) {{
+                Uri[] out = null;
+                if (res == RESULT_OK && data != null) {{
+                  if (data.getClipData() != null) {{ out = new Uri[data.getClipData().getItemCount()]; for (int i = 0; i < out.length; i++) out[i] = data.getClipData().getItemAt(i).getUri(); }}
+                  else if (data.getData() != null) out = new Uri[]{{ data.getData() }};
+                }}
+                fileCallback.onReceiveValue(out); fileCallback = null;
+              }}
             }}
             void openExternally(Uri u) {{ try {{ startActivity(new Intent(Intent.ACTION_VIEW, u)); }} catch (Exception ex) {{ Toast.makeText(this, "No app can open this file", Toast.LENGTH_SHORT).show(); }} }}
             static final String OFFLINE = "<html><head><meta name='viewport' content='width=device-width, initial-scale=1'></head><body style='font-family:sans-serif;text-align:center;padding-top:35%'><h2>No internet</h2><p>Check your connection and pull down to retry.</p></body></html>";
@@ -211,11 +299,19 @@ jobs:
               }}
               swipe.setOnChildScrollUpCallback((parent, child) -> web.canScrollVertically(-1));
               swipe.setOnRefreshListener(() -> {{ String u = web.getUrl(); if (u == null || u.startsWith("data:") || u.startsWith("about:")) web.loadUrl(START); else web.reload(); }});
-              if (RUNTIME.length > 0 && android.os.Build.VERSION.SDK_INT >= 23) requestPermissions(RUNTIME, 1);
+              web.addJavascriptInterface(new Bridge(), "W2A");
+              if (NOTIFY && WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) WebViewCompat.addDocumentStartJavaScript(web, BRIDGE, Collections.singleton("*"));
+              IntentFilter df = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
+              if (android.os.Build.VERSION.SDK_INT >= 33) registerReceiver(downloadDone, df, Context.RECEIVER_EXPORTED); else registerReceiver(downloadDone, df);
               s.setGeolocationEnabled(LOCATION); s.setMediaPlaybackRequiresUserGesture(false);
               s.setAllowFileAccess(FILES); s.setAllowContentAccess(FILES);
               web.setDownloadListener((dUrl, ua, cd, mime, len) -> {{
                 String file = URLUtil.guessFileName(dUrl, cd, mime);
+                if (dUrl.startsWith("data:")) {{ saveDataUrl(dUrl, file, mime); return; }}
+                if (dUrl.startsWith("blob:")) {{
+                  web.evaluateJavascript("fetch(" + org.json.JSONObject.quote(dUrl) + ").then(r=>r.blob()).then(b=>{{const f=new FileReader();f.onload=()=>W2A.saveFile(f.result," + org.json.JSONObject.quote(file) + "," + org.json.JSONObject.quote(mime == null ? "" : mime) + ");f.readAsDataURL(b);}})", null);
+                  return;
+                }}
                 if (!DOWNLOADS || !(dUrl.startsWith("http://") || dUrl.startsWith("https://"))) {{ openExternally(Uri.parse(dUrl)); return; }}
                 try {{
                   DownloadManager.Request q = new DownloadManager.Request(Uri.parse(dUrl));
@@ -231,11 +327,35 @@ jobs:
                   if (!FILES) {{ cb.onReceiveValue(null); return true; }}
                   if (fileCallback != null) fileCallback.onReceiveValue(null);
                   fileCallback = cb;
-                  try {{ startActivityForResult(params.createIntent(), 7); }} catch (Exception ex) {{ fileCallback = null; cb.onReceiveValue(null); return false; }}
+                  Intent pick = new Intent(Intent.ACTION_GET_CONTENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*");
+                  ArrayList<String> types = new ArrayList<>();
+                  for (String t : params.getAcceptTypes()) for (String x : t.split(",")) {{
+                    x = x.trim().toLowerCase(); if (x.isEmpty()) continue;
+                    if (x.equals(".pdf")) x = "application/pdf"; else if (x.equals(".jpg") || x.equals(".jpeg")) x = "image/jpeg"; else if (x.equals(".png")) x = "image/png"; else if (x.startsWith(".")) {{ types.clear(); break; }}
+                    types.add(x);
+                  }}
+                  if (!types.isEmpty() && !types.contains("*/*")) pick.putExtra(Intent.EXTRA_MIME_TYPES, types.toArray(new String[0]));
+                  if (params.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE) pick.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+                  try {{ startActivityForResult(Intent.createChooser(pick, "Choose file"), 7); }} catch (Exception ex) {{ fileCallback = null; cb.onReceiveValue(null); return false; }}
                   return true;
                 }}
-                @Override public void onPermissionRequest(PermissionRequest r) {{ if (MEDIA) r.grant(r.getResources()); else r.deny(); }}
-                @Override public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback cb) {{ cb.invoke(origin, LOCATION, false); }}
+                @Override public void onPermissionRequest(PermissionRequest r) {{ runOnUiThread(() -> {{
+                  ArrayList<String> need = new ArrayList<>(); boolean allowed = false;
+                  for (String res : r.getResources()) {{
+                    if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(res) && CAMERA) {{ allowed = true; if (!has(android.Manifest.permission.CAMERA)) need.add(android.Manifest.permission.CAMERA); }}
+                    if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(res) && MIC) {{ allowed = true; if (!has(android.Manifest.permission.RECORD_AUDIO)) need.add(android.Manifest.permission.RECORD_AUDIO); }}
+                  }}
+                  if (!allowed) {{ r.deny(); return; }}
+                  if (pendingMedia != null) pendingMedia.deny();
+                  pendingMedia = r;
+                  if (need.isEmpty()) onRequestPermissionsResult(2, new String[0], new int[0]); else requestPermissions(need.toArray(new String[0]), 2);
+                }}); }}
+                @Override public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback cb) {{
+                  if (!LOCATION) {{ cb.invoke(origin, false, false); return; }}
+                  pendingGeoOrigin = origin; pendingGeo = cb;
+                  if (has(android.Manifest.permission.ACCESS_FINE_LOCATION)) onRequestPermissionsResult(3, new String[0], new int[0]);
+                  else requestPermissions(new String[]{{ android.Manifest.permission.ACCESS_FINE_LOCATION, android.Manifest.permission.ACCESS_COARSE_LOCATION }}, 3);
+                }}
               }});
               web.setWebViewClient(new WebViewClient() {{
                 @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {{
@@ -249,7 +369,7 @@ jobs:
                 }}
                 @Override public void onPageStarted(WebView v, String u, Bitmap favicon) {{ retainPage(); }}
                 @Override public void onPageCommitVisible(WebView v, String u) {{ revealPage(); }}
-                @Override public void onPageFinished(WebView v, String u) {{ v.evaluateJavascript(VIEWPORT, null); revealPage(); }}
+                @Override public void onPageFinished(WebView v, String u) {{ v.evaluateJavascript(VIEWPORT, null); if (NOTIFY) v.evaluateJavascript(BRIDGE, null); revealPage(); }}
                 @Override public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError error) {{
                   if (r.isForMainFrame()) {{ revealPage(); v.loadDataWithBaseURL(null, OFFLINE, "text/html", "utf-8", null); }}
                 }}
@@ -258,7 +378,7 @@ jobs:
             }}
             @Override protected void onSaveInstanceState(Bundle o) {{ super.onSaveInstanceState(o); web.saveState(o); }}
             @Override public void onBackPressed() {{ if (web.canGoBack()) {{ retainPage(); web.goBack(); }} else super.onBackPressed(); }}
-            @Override protected void onDestroy() {{ revealPage(); web.destroy(); super.onDestroy(); }}
+            @Override protected void onDestroy() {{ try {{ unregisterReceiver(downloadDone); }} catch (Exception ex) {{}} revealPage(); web.destroy(); super.onDestroy(); }}
           }}
           ''')
           PY
