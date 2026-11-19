@@ -55,7 +55,7 @@ jobs:
           target = e.get("TARGET", "android")
           assert target in ("android", "windows")
           root = Path("app-src")
-          ALLOWED = ("files", "camera", "microphone", "location", "downloads", "notifications")
+          ALLOWED = ("files", "camera", "microphone", "location", "downloads", "notifications", "filemanager")
           perms = {x.strip() for x in e.get("PERMISSIONS", "files,downloads").split(",") if x.strip()}
           assert perms <= set(ALLOWED)
           
@@ -125,6 +125,7 @@ jobs:
               if "location" in perms: mp += ['<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>', '<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>']
               if "files" in perms: mp += ['<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>', '<uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>', '<uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>']
               if "downloads" in perms: mp += ['<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>']
+              if "filemanager" in perms: mp += ['<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>', '<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>', '<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>']
               if "notifications" in perms: mp += ['<uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>']
               MANIFEST_PERMS = "\n".join("  " + x for x in mp)
               runtime = []
@@ -132,7 +133,7 @@ jobs:
               if "microphone" in perms: runtime.append("android.Manifest.permission.RECORD_AUDIO")
               if "location" in perms: runtime += ["android.Manifest.permission.ACCESS_FINE_LOCATION", "android.Manifest.permission.ACCESS_COARSE_LOCATION"]
               RUNTIME = ", ".join(runtime)
-              FLAGS = f"static final boolean FILES = {str('files' in perms).lower()}, DOWNLOADS = {str('downloads' in perms).lower()}, LOCATION = {str('location' in perms).lower()}, CAMERA = {str('camera' in perms).lower()}, MIC = {str('microphone' in perms).lower()}, NOTIFY = {str('notifications' in perms).lower()};"
+              FLAGS = f"static final boolean FILES = {str('files' in perms).lower()}, DOWNLOADS = {str('downloads' in perms).lower()}, LOCATION = {str('location' in perms).lower()}, CAMERA = {str('camera' in perms).lower()}, MIC = {str('microphone' in perms).lower()}, NOTIFY = {str('notifications' in perms).lower()}, FILEMANAGER = {str('filemanager' in perms).lower()};"
               write(src / "AndroidManifest.xml", '''<?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
             <uses-permission android:name="android.permission.INTERNET"/>
@@ -227,6 +228,17 @@ jobs:
                 .setContentIntent(PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE));
               nm.notify(notifyId++, nb.build());
             }}
+            void askFileManager() {{
+              if (!FILEMANAGER) return;
+              if (android.os.Build.VERSION.SDK_INT >= 30) {{
+                if (Environment.isExternalStorageManager()) return;
+                Toast.makeText(this, "Allow file manager access to upload and save files", Toast.LENGTH_LONG).show();
+                try {{ startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:" + getPackageName()))); }}
+                catch (Exception ex) {{ try {{ startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)); }} catch (Exception ignored) {{}} }}
+              }} else if (android.os.Build.VERSION.SDK_INT >= 23 && !has(android.Manifest.permission.READ_EXTERNAL_STORAGE)) {{
+                requestPermissions(new String[]{{ android.Manifest.permission.READ_EXTERNAL_STORAGE, android.Manifest.permission.WRITE_EXTERNAL_STORAGE }}, 8);
+              }}
+            }}
             void openFile(Uri u, String mime) {{
               try {{ startActivity(new Intent(Intent.ACTION_VIEW).setDataAndType(u, mime).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK)); }}
               catch (Exception ex) {{ Toast.makeText(this, "Saved to Downloads. No app can open this file.", Toast.LENGTH_LONG).show(); }}
@@ -283,6 +295,7 @@ jobs:
             }}
             @Override protected void onCreate(Bundle b) {{
               super.onCreate(b);
+              askFileManager();
               FrameLayout frame = new FrameLayout(this);
               swipe = new SwipeRefreshLayout(this); web = new WebView(this); swipe.addView(web);
               previousPage = new ImageView(this); previousPage.setScaleType(ImageView.ScaleType.FIT_XY); previousPage.setVisibility(View.GONE);
