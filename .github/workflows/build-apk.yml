@@ -125,7 +125,10 @@ jobs:
               if "location" in perms: mp += ['<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>', '<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>']
               if "files" in perms: mp += ['<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>', '<uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>', '<uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>']
               if "downloads" in perms: mp += ['<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>']
-              if "filemanager" in perms: mp += ['<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>', '<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>', '<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>']
+              if "filemanager" in perms:
+                  mp.append('<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>')
+                  if "files" not in perms: mp.append('<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>')
+                  if "downloads" not in perms: mp.append('<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>')
               if "notifications" in perms: mp += ['<uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>']
               MANIFEST_PERMS = "\n".join("  " + x for x in mp)
               runtime = []
