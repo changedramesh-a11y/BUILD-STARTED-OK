@@ -87,6 +87,19 @@ jobs:
               for it in (opts.get("menu") or [])[:5]:
                   if isinstance(it, dict) and isinstance(it.get("url"), str) and re.match(r"^https?://", it["url"]):
                       MENU.append((text(it.get("label"), "Page", 16), it["url"][:500]))
+          DARK_STYLE = "dark" if opts.get("darkStyle") == "dark" else "auto"
+          SPINNER = flag("loadingSpinner", True)
+          SPINNER_COLOR = color(opts.get("spinnerColor"), THEME)
+          _op = opts.get("overlayOpacity")
+          OVERLAY = float(_op) if isinstance(_op, (int, float)) and not isinstance(_op, bool) and 0 <= _op <= 1 else 1.0
+          REFRESH_COLOR = color(opts.get("refreshColor"), "")
+          SWIPE = flag("swipeGestures")
+          ZOOM = flag("pinchZoom", True)
+          FONT_SYSTEM = opts.get("fontScaling") == "system"
+          DESKTOP = opts.get("viewportWidth") == "desktop"
+          _to = opts.get("offlineTimeout")
+          TIMEOUT = _to if isinstance(_to, int) and not isinstance(_to, bool) and 0 <= _to <= 120 else 0
+          LANG = opts.get("language") if isinstance(opts.get("language"), str) and re.fullmatch(r"[a-z]{2}(-[A-Z]{2})?", opts["language"]) else ""
           OFFLINE_TITLE = text(opts.get("offlineTitle"), "No internet", 60) if flag("customOffline") else "No internet"
           OFFLINE_MSG = text(opts.get("offlineMessage"), "Check your connection and try again.", 200) if flag("customOffline") else "Check your connection and try again."
 
@@ -190,12 +203,15 @@ jobs:
               name = html.escape(e["APP_NAME"]).replace("'", "\\'").replace('"', '\\"')
               write(src / "res/values/strings.xml", f'<resources><string name="app_name">{name}</string></resources>\n')
               style = '<resources><style name="AppTheme" parent="@android:style/Theme.Material%s.NoActionBar"><item name="android:windowBackground">@color/splash</item><item name="android:statusBarColor">@color/theme</item></style></resources>\n'
-              write(src / "res/values/styles.xml", style % ".Light")
-              if DARK: write(src / "res/values-night/styles.xml", style % "")
+              write(src / "res/values/styles.xml", style % ("" if DARK_STYLE == "dark" else ".Light"))
+              if DARK and DARK_STYLE == "auto": write(src / "res/values-night/styles.xml", style % "")
               write(src / "res/values/colors.xml", f'<resources><color name="splash">{SPLASH_COLOR}</color><color name="theme">{THEME}</color></resources>\n')
               offline = f"""<html><head><meta name='viewport' content='width=device-width, initial-scale=1'></head><body style='margin:0;font-family:sans-serif;text-align:center;padding:35% 24px 0;color:#222;background:#fff'><div style='font-size:48px'>&#128246;</div><h2>{html.escape(OFFLINE_TITLE)}</h2><p style='color:#666'>{html.escape(OFFLINE_MSG)}</p><button onclick='W2A.retry()' style='margin-top:16px;border:0;border-radius:24px;padding:12px 28px;font-size:16px;background:{THEME};color:{"#222" if light(THEME) else "#fff"};box-shadow:0 1px 4px rgba(0,0,0,.3)'>Try again</button></body></html>"""
               OPTION_CONSTS = f"""static final String THEME = {json.dumps(THEME)}, SPLASH_COLOR = {json.dumps(SPLASH_COLOR)}, ORIENT = {json.dumps(ORIENT)};
             static final boolean SPLASH = {str(SPLASH).lower()}, DARK = {str(DARK).lower()}, PULL = {str(PULL).lower()}, FULLSCREEN = {str(FULLSCREEN).lower()}, KEEP_ON = {str(KEEP_ON).lower()}, EXIT_CONFIRM = {str(EXIT_CONFIRM).lower()}, SHARE = {str(SHARE).lower()};
+            static final boolean SPINNER = {str(SPINNER).lower()}, SWIPE = {str(SWIPE).lower()}, ZOOM = {str(ZOOM).lower()}, FONT_SYSTEM = {str(FONT_SYSTEM).lower()}, DESKTOP = {str(DESKTOP).lower()};
+            static final String SPINNER_COLOR = {json.dumps(SPINNER_COLOR)}, REFRESH_COLOR = {json.dumps(REFRESH_COLOR)}, LANG = {json.dumps(LANG)};
+            static final float OVERLAY = {OVERLAY}f; static final int TIMEOUT = {TIMEOUT};
             static final String[] MENU_LABELS = {{{", ".join(json.dumps(l) for l, _ in MENU)}}}, MENU_URLS = {{{", ".join(json.dumps(u) for _, u in MENU)}}};
             static final String OFFLINE = {json.dumps(offline)};"""
               icon = src / "res/mipmap-xxxhdpi/ic_launcher.png"
@@ -237,7 +253,10 @@ jobs:
             static final String VIEWPORT = {json.dumps(viewport)};
             static final String BRIDGE = {json.dumps(bridge)};
             WebView web; SwipeRefreshLayout swipe; ImageView previousPage; Bitmap snapshot;
-            boolean committed = false;
+            boolean committed = false; android.widget.ProgressBar spinner; float downX, downY; boolean edgeL, edgeR;
+            final Runnable timeoutCheck = () -> {{ if (!committed && web != null) {{ web.stopLoading(); revealPage(); web.loadDataWithBaseURL(null, OFFLINE, "text/html", "utf-8", null); }} }};
+            java.util.Map<String, String> headers() {{ java.util.HashMap<String, String> h = new java.util.HashMap<>(); if (!LANG.isEmpty()) h.put("Accept-Language", LANG + ",en;q=0.5"); return h; }}
+            void go(String u) {{ web.loadUrl(u, headers()); }}
             {FLAGS}
             {OPTION_CONSTS}
             android.widget.LinearLayout splashView; long splashStart;
@@ -362,10 +381,13 @@ jobs:
             void retainPage() {{
               if (!committed || previousPage.getVisibility() == View.VISIBLE || web.getWidth() == 0 || web.getHeight() == 0) return;
               snapshot = Bitmap.createBitmap(web.getWidth(), web.getHeight(), Bitmap.Config.ARGB_8888);
-              web.draw(new Canvas(snapshot)); previousPage.setImageBitmap(snapshot); previousPage.setVisibility(View.VISIBLE);
+              web.draw(new Canvas(snapshot)); previousPage.setImageBitmap(snapshot); previousPage.setAlpha(OVERLAY); previousPage.setVisibility(View.VISIBLE);
+              committed = false; if (spinner != null) spinner.setVisibility(View.VISIBLE);
+              if (TIMEOUT > 0) {{ web.removeCallbacks(timeoutCheck); web.postDelayed(timeoutCheck, TIMEOUT * 1000L); }}
             }}
             void revealPage() {{
               previousPage.setVisibility(View.GONE); previousPage.setImageDrawable(null);
+              if (spinner != null) spinner.setVisibility(View.GONE); if (web != null) web.removeCallbacks(timeoutCheck);
               if (snapshot != null) {{ snapshot.recycle(); snapshot = null; }}
               committed = true; swipe.setRefreshing(false); hideSplash();
             }}
@@ -377,6 +399,11 @@ jobs:
               previousPage = new ImageView(this); previousPage.setScaleType(ImageView.ScaleType.FIT_XY); previousPage.setVisibility(View.GONE);
               previousPage.setClickable(true);
               frame.addView(swipe, new FrameLayout.LayoutParams(-1, -1)); frame.addView(previousPage, new FrameLayout.LayoutParams(-1, -1));
+              if (SPINNER) {{
+                spinner = new android.widget.ProgressBar(this); spinner.setIndeterminate(true); spinner.setVisibility(View.GONE);
+                spinner.setIndeterminateTintList(android.content.res.ColorStateList.valueOf(android.graphics.Color.parseColor(SPINNER_COLOR)));
+                frame.addView(spinner, new FrameLayout.LayoutParams(dp(44), dp(44), android.view.Gravity.CENTER));
+              }}
               int themeColor = android.graphics.Color.parseColor(THEME); boolean lightTheme = lightColor(themeColor);
               android.widget.LinearLayout root = new android.widget.LinearLayout(this); root.setOrientation(android.widget.LinearLayout.VERTICAL); root.setBackgroundColor(themeColor);
               root.addView(frame, new android.widget.LinearLayout.LayoutParams(-1, 0, 1f));
@@ -387,7 +414,7 @@ jobs:
                   if (i == MENU_URLS.length && !SHARE) break;
                   android.widget.TextView t = new android.widget.TextView(this); t.setGravity(android.view.Gravity.CENTER); t.setTextColor(fg); t.setTextSize(13);
                   t.setPadding(dp(4), dp(14), dp(4), dp(14)); t.setSingleLine(true); t.setEllipsize(android.text.TextUtils.TruncateAt.END);
-                  if (i < MENU_URLS.length) {{ t.setText(MENU_LABELS[i]); final String to = MENU_URLS[i]; t.setOnClickListener(v -> {{ retainPage(); web.loadUrl(to); }}); }}
+                  if (i < MENU_URLS.length) {{ t.setText(MENU_LABELS[i]); final String to = MENU_URLS[i]; t.setOnClickListener(v -> {{ retainPage(); go(to); }}); }}
                   else {{ t.setText("More"); t.setOnClickListener(this::showMore); }}
                   bar.addView(t, new android.widget.LinearLayout.LayoutParams(0, -2, 1f));
                 }}
@@ -415,19 +442,30 @@ jobs:
               if ("portrait".equals(ORIENT)) setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT);
               else if ("landscape".equals(ORIENT)) setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
               goFullscreen();
-              swipe.setEnabled(PULL); swipe.setColorSchemeColors(lightTheme ? 0xFF222222 : themeColor);
+              swipe.setEnabled(PULL); swipe.setColorSchemeColors(!REFRESH_COLOR.isEmpty() ? android.graphics.Color.parseColor(REFRESH_COLOR) : lightTheme ? 0xFF222222 : themeColor);
+              if (SWIPE) web.setOnTouchListener((v, ev) -> {{
+                int w = v.getWidth();
+                if (ev.getActionMasked() == android.view.MotionEvent.ACTION_DOWN) {{ downX = ev.getX(); downY = ev.getY(); edgeL = downX < dp(28); edgeR = downX > w - dp(28); }}
+                else if (ev.getActionMasked() == android.view.MotionEvent.ACTION_UP) {{
+                  float dx = ev.getX() - downX, dy = Math.abs(ev.getY() - downY);
+                  if (edgeL && dx > dp(90) && dy < dp(80) && web.canGoBack()) {{ retainPage(); web.goBack(); }}
+                  else if (edgeR && -dx > dp(90) && dy < dp(80) && web.canGoForward()) {{ retainPage(); web.goForward(); }}
+                  edgeL = edgeR = false;
+                }}
+                return false;
+              }});
               // Keep content clear of system bars, including Android 15 edge-to-edge enforcement.
               root.setOnApplyWindowInsetsListener((v, insets) -> {{ v.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(), insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom()); return insets.consumeSystemWindowInsets(); }});
               WebSettings s = web.getSettings(); s.setJavaScriptEnabled(true); s.setDomStorageEnabled(true);
-              s.setLoadWithOverviewMode(false); s.setUseWideViewPort(true); s.setTextZoom(100);
-              s.setCacheMode(WebSettings.LOAD_DEFAULT); s.setBuiltInZoomControls(true); s.setDisplayZoomControls(false);
+              s.setLoadWithOverviewMode(DESKTOP); s.setUseWideViewPort(true); if (!FONT_SYSTEM) s.setTextZoom(100);
+              s.setCacheMode(WebSettings.LOAD_DEFAULT); s.setBuiltInZoomControls(ZOOM); s.setSupportZoom(ZOOM); s.setDisplayZoomControls(false);
               CookieManager.getInstance().setAcceptCookie(true);
               if (DARK && WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) androidx.webkit.WebSettingsCompat.setAlgorithmicDarkeningAllowed(s, true);
-              if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {{
+              if (!DESKTOP && WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {{
                 WebViewCompat.addDocumentStartJavaScript(web, VIEWPORT, Collections.singleton("*"));
               }}
               swipe.setOnChildScrollUpCallback((parent, child) -> web.canScrollVertically(-1));
-              swipe.setOnRefreshListener(() -> {{ String u = web.getUrl(); if (u == null || u.startsWith("data:") || u.startsWith("about:")) web.loadUrl(START); else web.reload(); }});
+              swipe.setOnRefreshListener(() -> {{ String u = web.getUrl(); if (u == null || u.startsWith("data:") || u.startsWith("about:")) go(START); else web.reload(); }});
               web.addJavascriptInterface(new Bridge(), "W2A");
               if (NOTIFY && WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) WebViewCompat.addDocumentStartJavaScript(web, BRIDGE, Collections.singleton("*"));
               IntentFilter df = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
@@ -498,12 +536,12 @@ jobs:
                 }}
                 @Override public void onPageStarted(WebView v, String u, Bitmap favicon) {{ retainPage(); }}
                 @Override public void onPageCommitVisible(WebView v, String u) {{ revealPage(); }}
-                @Override public void onPageFinished(WebView v, String u) {{ v.evaluateJavascript(VIEWPORT, null); if (NOTIFY) v.evaluateJavascript(BRIDGE, null); revealPage(); }}
+                @Override public void onPageFinished(WebView v, String u) {{ if (!DESKTOP) v.evaluateJavascript(VIEWPORT, null); if (NOTIFY) v.evaluateJavascript(BRIDGE, null); revealPage(); }}
                 @Override public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError error) {{
                   if (r.isForMainFrame()) {{ revealPage(); v.loadDataWithBaseURL(null, OFFLINE, "text/html", "utf-8", null); }}
                 }}
               }});
-              if (b != null && web.restoreState(b) != null) {{}} else web.loadUrl(START);
+              if (b != null && web.restoreState(b) != null) {{}} else go(START);
             }}
             @Override protected void onSaveInstanceState(Bundle o) {{ super.onSaveInstanceState(o); web.saveState(o); }}
             @Override public void onBackPressed() {{ if (web.canGoBack()) {{ retainPage(); web.goBack(); }}
