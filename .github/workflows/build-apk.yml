@@ -95,6 +95,12 @@ jobs:
           REFRESH_COLOR = color(opts.get("refreshColor"), "")
           SWIPE = flag("swipeGestures")
           ZOOM = flag("pinchZoom", True)
+          JS = flag("javascript", True)
+          DOM = flag("domStorage", True)
+          HW = flag("hardwareAccel", True)
+          CACHE = flag("caching", True)
+          BACKNAV = flag("backNav", True)
+          EXT_PDF = flag("externalPdf", True)
           FONT_SYSTEM = opts.get("fontScaling") == "system"
           DESKTOP = opts.get("viewportWidth") == "desktop"
           _to = opts.get("offlineTimeout")
@@ -193,7 +199,7 @@ jobs:
             <uses-permission android:name="android.permission.INTERNET"/>
             <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
           ''' + MANIFEST_PERMS + '''
-            <application android:label="@string/app_name" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:usesCleartextTraffic="true" android:theme="@style/AppTheme" android:hardwareAccelerated="true">
+            <application android:label="@string/app_name" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:usesCleartextTraffic="true" android:theme="@style/AppTheme" android:hardwareAccelerated="''' + str(HW).lower() + '''">
               <activity android:name=".MainActivity" android:exported="true" android:configChanges="orientation|screenSize|keyboardHidden">
                 <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
               </activity>
@@ -209,7 +215,7 @@ jobs:
               offline = f"""<html><head><meta name='viewport' content='width=device-width, initial-scale=1'></head><body style='margin:0;font-family:sans-serif;text-align:center;padding:35% 24px 0;color:#222;background:#fff'><div style='font-size:48px'>&#128246;</div><h2>{html.escape(OFFLINE_TITLE)}</h2><p style='color:#666'>{html.escape(OFFLINE_MSG)}</p><button onclick='W2A.retry()' style='margin-top:16px;border:0;border-radius:24px;padding:12px 28px;font-size:16px;background:{THEME};color:{"#222" if light(THEME) else "#fff"};box-shadow:0 1px 4px rgba(0,0,0,.3)'>Try again</button></body></html>"""
               OPTION_CONSTS = f"""static final String THEME = {json.dumps(THEME)}, SPLASH_COLOR = {json.dumps(SPLASH_COLOR)}, ORIENT = {json.dumps(ORIENT)};
             static final boolean SPLASH = {str(SPLASH).lower()}, DARK = {str(DARK).lower()}, PULL = {str(PULL).lower()}, FULLSCREEN = {str(FULLSCREEN).lower()}, KEEP_ON = {str(KEEP_ON).lower()}, EXIT_CONFIRM = {str(EXIT_CONFIRM).lower()}, SHARE = {str(SHARE).lower()};
-            static final boolean SPINNER = {str(SPINNER).lower()}, SWIPE = {str(SWIPE).lower()}, ZOOM = {str(ZOOM).lower()}, FONT_SYSTEM = {str(FONT_SYSTEM).lower()}, DESKTOP = {str(DESKTOP).lower()};
+            static final boolean SPINNER = {str(SPINNER).lower()}, SWIPE = {str(SWIPE).lower()}, ZOOM = {str(ZOOM).lower()}, FONT_SYSTEM = {str(FONT_SYSTEM).lower()}, DESKTOP = {str(DESKTOP).lower()}, JS = {str(JS).lower()}, DOM = {str(DOM).lower()}, CACHE = {str(CACHE).lower()}, BACKNAV = {str(BACKNAV).lower()}, EXT_PDF = {str(EXT_PDF).lower()};
             static final String SPINNER_COLOR = {json.dumps(SPINNER_COLOR)}, REFRESH_COLOR = {json.dumps(REFRESH_COLOR)}, LANG = {json.dumps(LANG)};
             static final float OVERLAY = {OVERLAY}f; static final int TIMEOUT = {TIMEOUT};
             static final String[] MENU_LABELS = {{{", ".join(json.dumps(l) for l, _ in MENU)}}}, MENU_URLS = {{{", ".join(json.dumps(u) for _, u in MENU)}}};
@@ -456,9 +462,9 @@ jobs:
               }});
               // Keep content clear of system bars, including Android 15 edge-to-edge enforcement.
               root.setOnApplyWindowInsetsListener((v, insets) -> {{ v.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(), insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom()); return insets.consumeSystemWindowInsets(); }});
-              WebSettings s = web.getSettings(); s.setJavaScriptEnabled(true); s.setDomStorageEnabled(true);
+              WebSettings s = web.getSettings(); s.setJavaScriptEnabled(JS); s.setDomStorageEnabled(DOM);
               s.setLoadWithOverviewMode(DESKTOP); s.setUseWideViewPort(true); if (!FONT_SYSTEM) s.setTextZoom(100);
-              s.setCacheMode(WebSettings.LOAD_DEFAULT); s.setBuiltInZoomControls(ZOOM); s.setSupportZoom(ZOOM); s.setDisplayZoomControls(false);
+              s.setCacheMode(CACHE ? WebSettings.LOAD_DEFAULT : WebSettings.LOAD_NO_CACHE); s.setBuiltInZoomControls(ZOOM); s.setSupportZoom(ZOOM); s.setDisplayZoomControls(false);
               CookieManager.getInstance().setAcceptCookie(true);
               if (DARK && WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) androidx.webkit.WebSettingsCompat.setAlgorithmicDarkeningAllowed(s, true);
               if (!DESKTOP && WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {{
@@ -527,7 +533,7 @@ jobs:
               web.setWebViewClient(new WebViewClient() {{
                 @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {{
                   Uri u = r.getUrl(); String scheme = u.getScheme();
-                  if (("http".equals(scheme) || "https".equals(scheme)) && u.getPath() != null && u.getPath().toLowerCase().endsWith(".pdf")) {{ openExternally(u); return true; }}
+                  if (EXT_PDF && ("http".equals(scheme) || "https".equals(scheme)) && u.getPath() != null && u.getPath().toLowerCase().endsWith(".pdf")) {{ openExternally(u); return true; }}
                   if ("http".equals(scheme) || "https".equals(scheme)) {{ if (r.isForMainFrame()) retainPage(); return false; }}
                   if ("tel".equals(scheme) || "mailto".equals(scheme) || "whatsapp".equals(scheme) || "sms".equals(scheme)) {{
                     try {{ startActivity(new Intent(Intent.ACTION_VIEW, u)); }} catch (Exception ex) {{}}
@@ -544,7 +550,7 @@ jobs:
               if (b != null && web.restoreState(b) != null) {{}} else go(START);
             }}
             @Override protected void onSaveInstanceState(Bundle o) {{ super.onSaveInstanceState(o); web.saveState(o); }}
-            @Override public void onBackPressed() {{ if (web.canGoBack()) {{ retainPage(); web.goBack(); }}
+            @Override public void onBackPressed() {{ if (BACKNAV && web.canGoBack()) {{ retainPage(); web.goBack(); }}
               else if (EXIT_CONFIRM) new android.app.AlertDialog.Builder(this).setMessage("Exit " + getString(R.string.app_name) + "?").setPositiveButton("Exit", (d, w) -> finish()).setNegativeButton("Stay", null).show();
               else super.onBackPressed(); }}
             @Override protected void onDestroy() {{ try {{ unregisterReceiver(downloadDone); }} catch (Exception ex) {{}} revealPage(); web.destroy(); super.onDestroy(); }}
