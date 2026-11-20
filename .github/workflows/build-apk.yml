@@ -93,13 +93,11 @@ jobs:
           _op = opts.get("overlayOpacity")
           OVERLAY = float(_op) if isinstance(_op, (int, float)) and not isinstance(_op, bool) and 0 <= _op <= 1 else 1.0
           REFRESH_COLOR = color(opts.get("refreshColor"), "")
-          SWIPE = flag("swipeGestures")
           ZOOM = flag("pinchZoom", True)
           JS = flag("javascript", True)
           DOM = flag("domStorage", True)
           HW = flag("hardwareAccel", True)
           CACHE = flag("caching", True)
-          BACKNAV = flag("backNav", True)
           EXT_PDF = flag("externalPdf", True)
           assert isinstance(opts.get("pdfChooser", True), bool), "pdfChooser must be a boolean"
           PDF_CHOOSER = flag("pdfChooser", True)
@@ -218,7 +216,7 @@ jobs:
               offline = f"""<html><head><meta name='viewport' content='width=device-width, initial-scale=1'></head><body style='margin:0;font-family:sans-serif;text-align:center;padding:35% 24px 0;color:#222;background:#fff'><div style='font-size:48px'>&#128246;</div><h2>{html.escape(OFFLINE_TITLE)}</h2><p style='color:#666'>{html.escape(OFFLINE_MSG)}</p><button onclick='W2A.retry()' style='margin-top:16px;border:0;border-radius:24px;padding:12px 28px;font-size:16px;background:{THEME};color:{"#222" if light(THEME) else "#fff"};box-shadow:0 1px 4px rgba(0,0,0,.3)'>Try again</button></body></html>"""
               OPTION_CONSTS = f"""static final String THEME = {json.dumps(THEME)}, SPLASH_COLOR = {json.dumps(SPLASH_COLOR)}, ORIENT = {json.dumps(ORIENT)};
             static final boolean SPLASH = {str(SPLASH).lower()}, DARK = {str(DARK).lower()}, PULL = {str(PULL).lower()}, FULLSCREEN = {str(FULLSCREEN).lower()}, KEEP_ON = {str(KEEP_ON).lower()}, EXIT_CONFIRM = {str(EXIT_CONFIRM).lower()}, SHARE = {str(SHARE).lower()};
-            static final boolean SPINNER = {str(SPINNER).lower()}, SWIPE = {str(SWIPE).lower()}, ZOOM = {str(ZOOM).lower()}, FONT_SYSTEM = {str(FONT_SYSTEM).lower()}, DESKTOP = {str(DESKTOP).lower()}, JS = {str(JS).lower()}, DOM = {str(DOM).lower()}, CACHE = {str(CACHE).lower()}, BACKNAV = {str(BACKNAV).lower()}, EXT_PDF = {str(EXT_PDF).lower()}, NATIVE = {str(NATIVE).lower()};
+            static final boolean SPINNER = {str(SPINNER).lower()}, ZOOM = {str(ZOOM).lower()}, FONT_SYSTEM = {str(FONT_SYSTEM).lower()}, DESKTOP = {str(DESKTOP).lower()}, JS = {str(JS).lower()}, DOM = {str(DOM).lower()}, CACHE = {str(CACHE).lower()}, EXT_PDF = {str(EXT_PDF).lower()}, NATIVE = {str(NATIVE).lower()};
             static final boolean PDF_CHOOSER = {str(PDF_CHOOSER).lower()};
             static final String SPINNER_COLOR = {json.dumps(SPINNER_COLOR)}, REFRESH_COLOR = {json.dumps(REFRESH_COLOR)}, LANG = {json.dumps(LANG)};
             static final float OVERLAY = {OVERLAY}f; static final int TIMEOUT = {TIMEOUT};
@@ -251,6 +249,28 @@ jobs:
                 N.prototype.close = function () {};
                 window.Notification = N;
               })();"""
+              page_back = r"""(() => {
+                const visible = (el) => {
+                  const r = el.getBoundingClientRect();
+                  const s = getComputedStyle(el);
+                  return r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < innerHeight &&
+                    r.right > 0 && r.left < innerWidth && s.visibility === 'visible' &&
+                    s.display !== 'none' && s.opacity !== '0' &&
+                    !el.closest('[hidden], [inert], [aria-hidden="true"]') &&
+                    !el.matches(':disabled, [aria-disabled="true"]');
+                };
+                const dialogs = Array.from(document.querySelectorAll('[role="dialog"], dialog[open]')).filter(visible);
+                const scope = dialogs.length ? dialogs[dialogs.length - 1] : document;
+                const controls = Array.from(scope.querySelectorAll('button, a[href], [role="button"], input[type="button"]')).filter(visible);
+                const named = (el) => [el.getAttribute('aria-label'), el.getAttribute('title'), el.textContent, el.value]
+                  .some(v => /^(?:go\s+)?back(?:\s+to\s+.{1,80})?$|^वापस(?:\s+जाएं)?$|^पीछे$/i.test((v || '').trim()));
+                const target = controls.find(el => el.hasAttribute('data-app-back')) || controls.find(named) ||
+                  controls.find(el => el.querySelector('.lucide-arrow-left, .lucide-chevron-left, .lucide-move-left, [data-icon="arrow-left"]') &&
+                    !(el.getAttribute('aria-label') || el.getAttribute('title') || el.textContent || '').trim());
+                if (!target) return false;
+                target.click();
+                return true;
+              })()"""
               write(jdir / "MainActivity.java", f'''package {pkg};
           import android.app.Activity; import android.content.Intent; import android.net.Uri; import android.os.Bundle;
           import android.webkit.*; import android.graphics.Bitmap; import android.graphics.Canvas; import android.view.View;
@@ -262,8 +282,10 @@ jobs:
             static final String START = {json.dumps(url)};
             static final String VIEWPORT = {json.dumps(viewport)};
             static final String BRIDGE = {json.dumps(bridge)};
+            static final String PAGE_BACK = {json.dumps(page_back)};
             WebView web; SwipeRefreshLayout swipe; ImageView previousPage; Bitmap snapshot;
-            boolean committed = false; android.widget.ProgressBar spinner; float downX, downY; boolean edgeL, edgeR;
+            boolean committed = false; android.widget.ProgressBar spinner; boolean backPending = false;
+            android.window.OnBackInvokedCallback systemBack;
             final Runnable timeoutCheck = () -> {{ if (!committed && web != null) {{ web.stopLoading(); revealPage(); web.loadDataWithBaseURL(null, OFFLINE, "text/html", "utf-8", null); }} }};
             java.util.Map<String, String> headers() {{ java.util.HashMap<String, String> h = new java.util.HashMap<>(); if (!LANG.isEmpty()) h.put("Accept-Language", LANG + ",en;q=0.5"); return h; }}
             void go(String u) {{ web.loadUrl(u, headers()); }}
@@ -439,6 +461,10 @@ jobs:
             }}
             @Override protected void onCreate(Bundle b) {{
               super.onCreate(b);
+              if (android.os.Build.VERSION.SDK_INT >= 33) {{
+                systemBack = this::handlePhoneBack;
+                getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, systemBack);
+              }}
               askFileManager();
               FrameLayout frame = new FrameLayout(this);
               swipe = new SwipeRefreshLayout(this); web = new WebView(this); swipe.addView(web);
@@ -492,17 +518,6 @@ jobs:
               else if ("landscape".equals(ORIENT)) setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
               goFullscreen();
               swipe.setEnabled(PULL); swipe.setColorSchemeColors(!REFRESH_COLOR.isEmpty() ? android.graphics.Color.parseColor(REFRESH_COLOR) : lightTheme ? 0xFF222222 : themeColor);
-              if (SWIPE) web.setOnTouchListener((v, ev) -> {{
-                int w = v.getWidth();
-                if (ev.getActionMasked() == android.view.MotionEvent.ACTION_DOWN) {{ downX = ev.getX(); downY = ev.getY(); edgeL = downX < dp(28); edgeR = downX > w - dp(28); }}
-                else if (ev.getActionMasked() == android.view.MotionEvent.ACTION_UP) {{
-                  float dx = ev.getX() - downX, dy = Math.abs(ev.getY() - downY);
-                  if (edgeL && dx > dp(90) && dy < dp(80) && web.canGoBack()) {{ retainPage(); web.goBack(); }}
-                  else if (edgeR && -dx > dp(90) && dy < dp(80) && web.canGoForward()) {{ retainPage(); web.goForward(); }}
-                  edgeL = edgeR = false;
-                }}
-                return false;
-              }});
               // Keep content clear of system bars, including Android 15 edge-to-edge enforcement.
               root.setOnApplyWindowInsetsListener((v, insets) -> {{ v.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(), insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom()); return insets.consumeSystemWindowInsets(); }});
               WebSettings s = web.getSettings(); s.setJavaScriptEnabled(JS); s.setDomStorageEnabled(DOM);
@@ -586,10 +601,21 @@ jobs:
               if (b != null && web.restoreState(b) != null) {{}} else go(START);
             }}
             @Override protected void onSaveInstanceState(Bundle o) {{ super.onSaveInstanceState(o); web.saveState(o); }}
-            @Override public void onBackPressed() {{ if (BACKNAV && web.canGoBack()) {{ retainPage(); web.goBack(); }}
+            void fallbackBack() {{ if (web.canGoBack()) {{ retainPage(); web.goBack(); }}
               else if (EXIT_CONFIRM) new android.app.AlertDialog.Builder(this).setMessage("Exit " + getString(R.string.app_name) + "?").setPositiveButton("Exit", (d, w) -> finish()).setNegativeButton("Stay", null).show();
-              else super.onBackPressed(); }}
-            @Override protected void onDestroy() {{ try {{ unregisterReceiver(downloadDone); }} catch (Exception ex) {{}} revealPage(); web.destroy(); super.onDestroy(); }}
+              else finish(); }}
+            void handlePhoneBack() {{
+              if (web == null || backPending) return;
+              if (!JS) {{ fallbackBack(); return; }}
+              backPending = true;
+              web.evaluateJavascript(PAGE_BACK, result -> {{
+                backPending = false;
+                if (isFinishing() || isDestroyed()) return;
+                if (!"true".equals(result)) fallbackBack();
+              }});
+            }}
+            @Override public void onBackPressed() {{ handlePhoneBack(); }}
+            @Override protected void onDestroy() {{ if (android.os.Build.VERSION.SDK_INT >= 33 && systemBack != null) getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(systemBack); try {{ unregisterReceiver(downloadDone); }} catch (Exception ex) {{}} revealPage(); web.destroy(); super.onDestroy(); }}
           }}
           ''')
           PY
