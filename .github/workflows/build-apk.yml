@@ -101,6 +101,7 @@ jobs:
           CACHE = flag("caching", True)
           BACKNAV = flag("backNav", True)
           EXT_PDF = flag("externalPdf", True)
+          NATIVE = flag("nativeMode", True)
           FONT_SYSTEM = opts.get("fontScaling") == "system"
           DESKTOP = opts.get("viewportWidth") == "desktop"
           _to = opts.get("offlineTimeout")
@@ -215,7 +216,7 @@ jobs:
               offline = f"""<html><head><meta name='viewport' content='width=device-width, initial-scale=1'></head><body style='margin:0;font-family:sans-serif;text-align:center;padding:35% 24px 0;color:#222;background:#fff'><div style='font-size:48px'>&#128246;</div><h2>{html.escape(OFFLINE_TITLE)}</h2><p style='color:#666'>{html.escape(OFFLINE_MSG)}</p><button onclick='W2A.retry()' style='margin-top:16px;border:0;border-radius:24px;padding:12px 28px;font-size:16px;background:{THEME};color:{"#222" if light(THEME) else "#fff"};box-shadow:0 1px 4px rgba(0,0,0,.3)'>Try again</button></body></html>"""
               OPTION_CONSTS = f"""static final String THEME = {json.dumps(THEME)}, SPLASH_COLOR = {json.dumps(SPLASH_COLOR)}, ORIENT = {json.dumps(ORIENT)};
             static final boolean SPLASH = {str(SPLASH).lower()}, DARK = {str(DARK).lower()}, PULL = {str(PULL).lower()}, FULLSCREEN = {str(FULLSCREEN).lower()}, KEEP_ON = {str(KEEP_ON).lower()}, EXIT_CONFIRM = {str(EXIT_CONFIRM).lower()}, SHARE = {str(SHARE).lower()};
-            static final boolean SPINNER = {str(SPINNER).lower()}, SWIPE = {str(SWIPE).lower()}, ZOOM = {str(ZOOM).lower()}, FONT_SYSTEM = {str(FONT_SYSTEM).lower()}, DESKTOP = {str(DESKTOP).lower()}, JS = {str(JS).lower()}, DOM = {str(DOM).lower()}, CACHE = {str(CACHE).lower()}, BACKNAV = {str(BACKNAV).lower()}, EXT_PDF = {str(EXT_PDF).lower()};
+            static final boolean SPINNER = {str(SPINNER).lower()}, SWIPE = {str(SWIPE).lower()}, ZOOM = {str(ZOOM).lower()}, FONT_SYSTEM = {str(FONT_SYSTEM).lower()}, DESKTOP = {str(DESKTOP).lower()}, JS = {str(JS).lower()}, DOM = {str(DOM).lower()}, CACHE = {str(CACHE).lower()}, BACKNAV = {str(BACKNAV).lower()}, EXT_PDF = {str(EXT_PDF).lower()}, NATIVE = {str(NATIVE).lower()};
             static final String SPINNER_COLOR = {json.dumps(SPINNER_COLOR)}, REFRESH_COLOR = {json.dumps(REFRESH_COLOR)}, LANG = {json.dumps(LANG)};
             static final float OVERLAY = {OVERLAY}f; static final int TIMEOUT = {TIMEOUT};
             static final String[] MENU_LABELS = {{{", ".join(json.dumps(l) for l, _ in MENU)}}}, MENU_URLS = {{{", ".join(json.dumps(u) for _, u in MENU)}}};
@@ -392,9 +393,17 @@ jobs:
               if (TIMEOUT > 0) {{ web.removeCallbacks(timeoutCheck); web.postDelayed(timeoutCheck, TIMEOUT * 1000L); }}
             }}
             void revealPage() {{
-              previousPage.setVisibility(View.GONE); previousPage.setImageDrawable(null);
               if (spinner != null) spinner.setVisibility(View.GONE); if (web != null) web.removeCallbacks(timeoutCheck);
-              if (snapshot != null) {{ snapshot.recycle(); snapshot = null; }}
+              if (NATIVE && !committed && previousPage.getVisibility() == View.VISIBLE) {{
+                web.setAlpha(0f); web.animate().alpha(1f).setDuration(220).start();
+                previousPage.animate().alpha(0f).setDuration(220).withEndAction(() -> {{
+                  previousPage.setVisibility(View.GONE); previousPage.setImageDrawable(null);
+                  if (snapshot != null) {{ snapshot.recycle(); snapshot = null; }}
+                }}).start();
+              }} else {{
+                previousPage.setVisibility(View.GONE); previousPage.setImageDrawable(null);
+                if (snapshot != null) {{ snapshot.recycle(); snapshot = null; }}
+              }}
               committed = true; swipe.setRefreshing(false); hideSplash();
             }}
             @Override protected void onCreate(Bundle b) {{
@@ -402,6 +411,7 @@ jobs:
               askFileManager();
               FrameLayout frame = new FrameLayout(this);
               swipe = new SwipeRefreshLayout(this); web = new WebView(this); swipe.addView(web);
+              if (NATIVE) {{ web.setScrollbarFadingEnabled(true); web.setScrollBarStyle(View.SCROLLBARS_INSIDE_OVERLAY); }} else web.setOverScrollMode(View.OVER_SCROLL_NEVER);
               previousPage = new ImageView(this); previousPage.setScaleType(ImageView.ScaleType.FIT_XY); previousPage.setVisibility(View.GONE);
               previousPage.setClickable(true);
               frame.addView(swipe, new FrameLayout.LayoutParams(-1, -1)); frame.addView(previousPage, new FrameLayout.LayoutParams(-1, -1));
