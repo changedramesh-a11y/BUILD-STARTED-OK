@@ -101,6 +101,8 @@ jobs:
           CACHE = flag("caching", True)
           BACKNAV = flag("backNav", True)
           EXT_PDF = flag("externalPdf", True)
+          assert isinstance(opts.get("pdfChooser", True), bool), "pdfChooser must be a boolean"
+          PDF_CHOOSER = flag("pdfChooser", True)
           NATIVE = flag("nativeMode", True)
           FONT_SYSTEM = opts.get("fontScaling") == "system"
           DESKTOP = opts.get("viewportWidth") == "desktop"
@@ -217,6 +219,7 @@ jobs:
               OPTION_CONSTS = f"""static final String THEME = {json.dumps(THEME)}, SPLASH_COLOR = {json.dumps(SPLASH_COLOR)}, ORIENT = {json.dumps(ORIENT)};
             static final boolean SPLASH = {str(SPLASH).lower()}, DARK = {str(DARK).lower()}, PULL = {str(PULL).lower()}, FULLSCREEN = {str(FULLSCREEN).lower()}, KEEP_ON = {str(KEEP_ON).lower()}, EXIT_CONFIRM = {str(EXIT_CONFIRM).lower()}, SHARE = {str(SHARE).lower()};
             static final boolean SPINNER = {str(SPINNER).lower()}, SWIPE = {str(SWIPE).lower()}, ZOOM = {str(ZOOM).lower()}, FONT_SYSTEM = {str(FONT_SYSTEM).lower()}, DESKTOP = {str(DESKTOP).lower()}, JS = {str(JS).lower()}, DOM = {str(DOM).lower()}, CACHE = {str(CACHE).lower()}, BACKNAV = {str(BACKNAV).lower()}, EXT_PDF = {str(EXT_PDF).lower()}, NATIVE = {str(NATIVE).lower()};
+            static final boolean PDF_CHOOSER = {str(PDF_CHOOSER).lower()};
             static final String SPINNER_COLOR = {json.dumps(SPINNER_COLOR)}, REFRESH_COLOR = {json.dumps(REFRESH_COLOR)}, LANG = {json.dumps(LANG)};
             static final float OVERLAY = {OVERLAY}f; static final int TIMEOUT = {TIMEOUT};
             static final String[] MENU_LABELS = {{{", ".join(json.dumps(l) for l, _ in MENU)}}}, MENU_URLS = {{{", ".join(json.dumps(u) for _, u in MENU)}}};
@@ -343,8 +346,33 @@ jobs:
               }}
             }}
             void openFile(Uri u, String mime) {{
-              try {{ startActivity(new Intent(Intent.ACTION_VIEW).setDataAndType(u, mime).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK)); }}
+              if (u == null) return;
+              String type = mime == null || mime.isEmpty() ? "application/octet-stream" : mime.split(";")[0].trim();
+              Intent view = new Intent(Intent.ACTION_VIEW).setDataAndType(u, type).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+              view.setClipData(android.content.ClipData.newRawUri("Document", u));
+              try {{
+                startActivity(PDF_CHOOSER && "application/pdf".equalsIgnoreCase(type)
+                  ? Intent.createChooser(view, "Choose your PDF opener").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) : view);
+              }}
               catch (Exception ex) {{ Toast.makeText(this, "Saved to Downloads. No app can open this file.", Toast.LENGTH_LONG).show(); }}
+            }}
+            final java.util.Map<Long, String> pendingDownloads = new java.util.HashMap<>();
+            void downloadFile(String dUrl, String ua, String cd, String mime) {{
+              String file = URLUtil.guessFileName(dUrl, cd, mime);
+              String type = file.toLowerCase(java.util.Locale.ROOT).endsWith(".pdf") ? "application/pdf" : mime;
+              try {{
+                DownloadManager.Request q = new DownloadManager.Request(Uri.parse(dUrl));
+                if (type != null && !type.isEmpty()) q.setMimeType(type);
+                String cookie = CookieManager.getInstance().getCookie(dUrl);
+                if (cookie != null && !cookie.isEmpty()) q.addRequestHeader("Cookie", cookie);
+                if (ua != null && !ua.isEmpty()) q.addRequestHeader("User-Agent", ua);
+                for (java.util.Map.Entry<String, String> h : headers().entrySet()) q.addRequestHeader(h.getKey(), h.getValue());
+                q.setTitle(file); q.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+                q.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, file);
+                long id = ((DownloadManager) getSystemService(DOWNLOAD_SERVICE)).enqueue(q);
+                pendingDownloads.put(id, type);
+                Toast.makeText(this, "Downloading " + file, Toast.LENGTH_SHORT).show();
+              }} catch (Exception ex) {{ Toast.makeText(this, "Could not download file. Please try again.", Toast.LENGTH_LONG).show(); }}
             }}
             // Website-generated files (blob:/data: links) cannot go through DownloadManager.
             void saveDataUrl(String dataUrl, String name, String mime) {{
@@ -352,6 +380,7 @@ jobs:
                 int comma = dataUrl.indexOf(','); if (comma < 0) return;
                 String head = dataUrl.substring(0, comma);
                 if (mime == null || mime.isEmpty()) mime = head.startsWith("data:") && head.contains(";") ? head.substring(5, head.indexOf(';')) : "application/octet-stream";
+                if (name != null && name.toLowerCase(java.util.Locale.ROOT).endsWith(".pdf")) mime = "application/pdf";
                 byte[] bytes = head.contains(";base64") ? Base64.decode(dataUrl.substring(comma + 1), Base64.DEFAULT) : Uri.decode(dataUrl.substring(comma + 1)).getBytes("UTF-8");
                 if (android.os.Build.VERSION.SDK_INT >= 29) {{
                   ContentValues cv = new ContentValues(); cv.put(MediaStore.Downloads.DISPLAY_NAME, name); cv.put(MediaStore.Downloads.MIME_TYPE, mime);
@@ -368,8 +397,10 @@ jobs:
             BroadcastReceiver downloadDone = new BroadcastReceiver() {{
               @Override public void onReceive(Context c, Intent i) {{
                 long id = i.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1);
+                if (!pendingDownloads.containsKey(id)) return;
+                String mime = pendingDownloads.remove(id);
                 DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
-                Uri u = dm.getUriForDownloadedFile(id); if (u != null) openFile(u, dm.getMimeTypeForDownloadedFile(id));
+                Uri u = dm.getUriForDownloadedFile(id); if (u != null) openFile(u, mime != null ? mime : dm.getMimeTypeForDownloadedFile(id));
               }}
             }};
             ValueCallback<Uri[]> fileCallback;
@@ -498,14 +529,7 @@ jobs:
                   return;
                 }}
                 if (!DOWNLOADS || !(dUrl.startsWith("http://") || dUrl.startsWith("https://"))) {{ openExternally(Uri.parse(dUrl)); return; }}
-                try {{
-                  DownloadManager.Request q = new DownloadManager.Request(Uri.parse(dUrl));
-                  q.setMimeType(mime); q.addRequestHeader("Cookie", CookieManager.getInstance().getCookie(dUrl)); q.addRequestHeader("User-Agent", ua);
-                  q.setTitle(file); q.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
-                  q.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, file);
-                  ((DownloadManager) getSystemService(DOWNLOAD_SERVICE)).enqueue(q);
-                  Toast.makeText(this, "Downloading " + file + " - tap the notification to open", Toast.LENGTH_LONG).show();
-                }} catch (Exception ex) {{ openExternally(Uri.parse(dUrl)); }}
+                downloadFile(dUrl, ua, cd, mime);
               }});
               web.setWebChromeClient(new WebChromeClient() {{
                 @Override public boolean onShowFileChooser(WebView v, ValueCallback<Uri[]> cb, FileChooserParams params) {{
@@ -545,7 +569,7 @@ jobs:
               web.setWebViewClient(new WebViewClient() {{
                 @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {{
                   Uri u = r.getUrl(); String scheme = u.getScheme();
-                  if (EXT_PDF && ("http".equals(scheme) || "https".equals(scheme)) && u.getPath() != null && u.getPath().toLowerCase().endsWith(".pdf")) {{ openExternally(u); return true; }}
+                  if ((EXT_PDF || PDF_CHOOSER) && ("http".equals(scheme) || "https".equals(scheme)) && u.getPath() != null && u.getPath().toLowerCase(java.util.Locale.ROOT).endsWith(".pdf")) {{ downloadFile(u.toString(), v.getSettings().getUserAgentString(), null, "application/pdf"); return true; }}
                   if ("http".equals(scheme) || "https".equals(scheme)) {{ if (r.isForMainFrame()) retainPage(); return false; }}
                   if ("tel".equals(scheme) || "mailto".equals(scheme) || "whatsapp".equals(scheme) || "sms".equals(scheme)) {{
                     try {{ startActivity(new Intent(Intent.ACTION_VIEW, u)); }} catch (Exception ex) {{}}
