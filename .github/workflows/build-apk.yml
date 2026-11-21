@@ -47,8 +47,9 @@ jobs:
           import json
           import shutil
           import html
+          import zipfile
           from pathlib import Path
-          
+
           e = os.environ
           pkg = e["PKG"]
           assert re.fullmatch(r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+", pkg)
@@ -109,22 +110,52 @@ jobs:
           LANG = opts.get("language") if isinstance(opts.get("language"), str) and re.fullmatch(r"[a-z]{2}(-[A-Z]{2})?", opts["language"]) else ""
           OFFLINE_TITLE = text(opts.get("offlineTitle"), "No internet", 60) if flag("customOffline") else "No internet"
           OFFLINE_MSG = text(opts.get("offlineMessage"), "Check your connection and try again.", 200) if flag("customOffline") else "Check your connection and try again."
-          
+
+          SITE_ZIP = Path(f"sites/{e['BUILD_ID']}.zip")
+          LOCAL = SITE_ZIP.exists()
+          LOCAL_URL = "https://appassets.androidplatform.net/assets/www/index.html"
+          if LOCAL:
+              url = LOCAL_URL
+
+          def extract_site(dest):
+              """Unpack uploaded website files safely; accepts index.html at the top or in one top folder."""
+              with zipfile.ZipFile(SITE_ZIP) as z:
+                  names = [n for n in z.namelist() if not n.endswith("/") and not n.startswith("__MACOSX/")]
+                  prefix = ""
+                  if "index.html" not in names:
+                      tops = {n.split("/")[0] for n in names}
+                      if len(tops) == 1 and f"{next(iter(tops))}/index.html" in names:
+                          prefix = next(iter(tops)) + "/"
+                  assert prefix + "index.html" in names, "The ZIP needs an index.html file"
+                  total = 0
+                  for n in names:
+                      if not n.startswith(prefix) or not n[len(prefix):]:
+                          continue
+                      rel = Path(n[len(prefix):].replace("\\", "/"))
+                      assert not rel.is_absolute() and ".." not in rel.parts and ":" not in str(rel)
+                      total += z.getinfo(n).file_size
+                      assert total < 200_000_000, "Website files are too large"
+                      out = Path(dest) / rel
+                      out.parent.mkdir(parents=True, exist_ok=True)
+                      out.write_bytes(z.read(n))
+
           def light(c):
               r, g, b = (int(c[i:i + 2], 16) for i in (1, 3, 5))
               return 0.299 * r + 0.587 * g + 0.114 * b > 160
-          
+
           def write(path, content):
               path = Path(path)
               path.parent.mkdir(parents=True, exist_ok=True)
               path.write_text(content, encoding="utf-8")
-          
+
           if target == "windows":
               write(root / "package.json", json.dumps({
                   "name": "website-app", "version": "1.0.0", "main": "main.cjs",
                   "devDependencies": {"electron": "40.0.0", "@electron/packager": "18.3.6"}
               }))
-              write(root / "config.json", json.dumps({"url": url, "name": e["APP_NAME"]}))
+              write(root / "config.json", json.dumps({"url": url, "name": e["APP_NAME"], "local": LOCAL}))
+              if LOCAL:
+                  extract_site(root / "www")
               shutil.copyfile(f"icons/{e['BUILD_ID']}.png", root / "icon.png")
               write(root / "main.cjs", '''const { app, BrowserWindow, shell } = require('electron');
           const path = require('node:path');
@@ -142,12 +173,12 @@ jobs:
             });
             window.webContents.setWindowOpenHandler(({ url }) => { openExternal(url); return { action: 'deny' }; });
             window.webContents.on('will-navigate', (event, url) => {
-              try { if (!['http:', 'https:'].includes(new URL(url).protocol)) { event.preventDefault(); openExternal(url); } }
+              try { if (!(config.local ? ['http:', 'https:', 'file:'] : ['http:', 'https:']).includes(new URL(url).protocol)) { event.preventDefault(); openExternal(url); } }
               catch { event.preventDefault(); }
             });
             window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
             window.once('ready-to-show', () => window.show());
-            window.loadURL(config.url);
+            if (config.local) window.loadFile(path.join(__dirname, 'www', 'index.html')); else window.loadURL(config.url);
           }
           app.whenReady().then(createWindow);
           app.on('window-all-closed', () => app.quit());
@@ -155,6 +186,8 @@ jobs:
           else:
               src = root / "app/src/main"
               jdir = src / "java" / pkg.replace(".", "/")
+              if LOCAL:
+                  extract_site(src / "assets/www")
               write(root / "settings.gradle", """pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
           dependencyResolutionManagement { repositories { google(); mavenCentral() } }
           rootProject.name = 'webapp'
@@ -217,7 +250,7 @@ jobs:
               OPTION_CONSTS = f"""static final String THEME = {json.dumps(THEME)}, SPLASH_COLOR = {json.dumps(SPLASH_COLOR)}, ORIENT = {json.dumps(ORIENT)};
             static final boolean SPLASH = {str(SPLASH).lower()}, DARK = {str(DARK).lower()}, PULL = {str(PULL).lower()}, FULLSCREEN = {str(FULLSCREEN).lower()}, KEEP_ON = {str(KEEP_ON).lower()}, EXIT_CONFIRM = {str(EXIT_CONFIRM).lower()}, SHARE = {str(SHARE).lower()};
             static final boolean SPINNER = {str(SPINNER).lower()}, ZOOM = {str(ZOOM).lower()}, FONT_SYSTEM = {str(FONT_SYSTEM).lower()}, DESKTOP = {str(DESKTOP).lower()}, JS = {str(JS).lower()}, DOM = {str(DOM).lower()}, CACHE = {str(CACHE).lower()}, EXT_PDF = {str(EXT_PDF).lower()}, NATIVE = {str(NATIVE).lower()};
-            static final boolean PDF_CHOOSER = {str(PDF_CHOOSER).lower()};
+            static final boolean PDF_CHOOSER = {str(PDF_CHOOSER).lower()}, LOCAL = {str(LOCAL).lower()};
             static final String SPINNER_COLOR = {json.dumps(SPINNER_COLOR)}, REFRESH_COLOR = {json.dumps(REFRESH_COLOR)}, LANG = {json.dumps(LANG)};
             static final float OVERLAY = {OVERLAY}f; static final int TIMEOUT = {TIMEOUT};
             static final String[] MENU_LABELS = {{{", ".join(json.dumps(l) for l, _ in MENU)}}}, MENU_URLS = {{{", ".join(json.dumps(u) for _, u in MENU)}}};
@@ -276,7 +309,7 @@ jobs:
           import android.webkit.*; import android.graphics.Bitmap; import android.graphics.Canvas; import android.view.View;
           import android.widget.FrameLayout; import android.widget.ImageView;
           import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
-          import androidx.webkit.WebViewCompat; import androidx.webkit.WebViewFeature;
+          import androidx.webkit.WebViewCompat; import androidx.webkit.WebViewFeature; import androidx.webkit.WebViewAssetLoader;
           import java.util.Collections; import java.util.ArrayList; import android.content.pm.PackageManager; import android.content.BroadcastReceiver; import android.content.Context; import android.content.IntentFilter; import android.app.NotificationManager; import android.app.NotificationChannel; import android.app.PendingIntent; import android.content.ContentValues; import android.provider.MediaStore; import android.util.Base64; import java.io.OutputStream; import android.app.DownloadManager; import android.os.Environment; import android.webkit.URLUtil; import android.widget.Toast;
           public class MainActivity extends Activity {{
             static final String START = {json.dumps(url)};
@@ -582,9 +615,11 @@ jobs:
                 }}
               }});
               web.setWebViewClient(new WebViewClient() {{
+                final WebViewAssetLoader assets = new WebViewAssetLoader.Builder().addPathHandler("/assets/", new WebViewAssetLoader.AssetsPathHandler(MainActivity.this)).build();
+                @Override public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest r) {{ return LOCAL ? assets.shouldInterceptRequest(r.getUrl()) : null; }}
                 @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {{
                   Uri u = r.getUrl(); String scheme = u.getScheme();
-                  if ((EXT_PDF || PDF_CHOOSER) && ("http".equals(scheme) || "https".equals(scheme)) && u.getPath() != null && u.getPath().toLowerCase(java.util.Locale.ROOT).endsWith(".pdf")) {{ downloadFile(u.toString(), v.getSettings().getUserAgentString(), null, "application/pdf"); return true; }}
+                  if ((EXT_PDF || PDF_CHOOSER) && !"appassets.androidplatform.net".equals(u.getHost()) && ("http".equals(scheme) || "https".equals(scheme)) && u.getPath() != null && u.getPath().toLowerCase(java.util.Locale.ROOT).endsWith(".pdf")) {{ downloadFile(u.toString(), v.getSettings().getUserAgentString(), null, "application/pdf"); return true; }}
                   if ("http".equals(scheme) || "https".equals(scheme)) {{ if (r.isForMainFrame()) retainPage(); return false; }}
                   if ("tel".equals(scheme) || "mailto".equals(scheme) || "whatsapp".equals(scheme) || "sms".equals(scheme)) {{
                     try {{ startActivity(new Intent(Intent.ACTION_VIEW, u)); }} catch (Exception ex) {{}}
