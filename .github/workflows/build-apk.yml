@@ -114,8 +114,8 @@ jobs:
           SITE_ZIP = Path(f"sites/{e['BUILD_ID']}.zip")
           LOCAL = SITE_ZIP.exists()
           LOCAL_URL = "https://appassets.androidplatform.net/assets/www/index.html"
-          if LOCAL:
-              url = LOCAL_URL
+          # Hybrid: an online website plus uploaded files used when the website cannot load.
+          HYBRID = LOCAL and url != LOCAL_URL
 
           def extract_site(dest):
               """Unpack uploaded website files safely; accepts index.html at the top or in one top folder."""
@@ -153,7 +153,7 @@ jobs:
                   "name": "website-app", "version": "1.0.0", "main": "main.cjs",
                   "devDependencies": {"electron": "40.0.0", "@electron/packager": "18.3.6"}
               }))
-              write(root / "config.json", json.dumps({"url": url, "name": e["APP_NAME"], "local": LOCAL}))
+              write(root / "config.json", json.dumps({"url": url, "name": e["APP_NAME"], "local": LOCAL and not HYBRID, "hybrid": HYBRID}))
               if LOCAL:
                   extract_site(root / "www")
               shutil.copyfile(f"icons/{e['BUILD_ID']}.png", root / "icon.png")
@@ -173,11 +173,12 @@ jobs:
             });
             window.webContents.setWindowOpenHandler(({ url }) => { openExternal(url); return { action: 'deny' }; });
             window.webContents.on('will-navigate', (event, url) => {
-              try { if (!(config.local ? ['http:', 'https:', 'file:'] : ['http:', 'https:']).includes(new URL(url).protocol)) { event.preventDefault(); openExternal(url); } }
+              try { if (!(config.local || config.hybrid ? ['http:', 'https:', 'file:'] : ['http:', 'https:']).includes(new URL(url).protocol)) { event.preventDefault(); openExternal(url); } }
               catch { event.preventDefault(); }
             });
             window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
             window.once('ready-to-show', () => window.show());
+            if (config.hybrid) window.webContents.on('did-fail-load', (_e, code, _d, _u, main) => { if (main && code !== -3) window.loadFile(path.join(__dirname, 'www', 'index.html')); });
             if (config.local) window.loadFile(path.join(__dirname, 'www', 'index.html')); else window.loadURL(config.url);
           }
           app.whenReady().then(createWindow);
@@ -250,7 +251,8 @@ jobs:
               OPTION_CONSTS = f"""static final String THEME = {json.dumps(THEME)}, SPLASH_COLOR = {json.dumps(SPLASH_COLOR)}, ORIENT = {json.dumps(ORIENT)};
             static final boolean SPLASH = {str(SPLASH).lower()}, DARK = {str(DARK).lower()}, PULL = {str(PULL).lower()}, FULLSCREEN = {str(FULLSCREEN).lower()}, KEEP_ON = {str(KEEP_ON).lower()}, EXIT_CONFIRM = {str(EXIT_CONFIRM).lower()}, SHARE = {str(SHARE).lower()};
             static final boolean SPINNER = {str(SPINNER).lower()}, ZOOM = {str(ZOOM).lower()}, FONT_SYSTEM = {str(FONT_SYSTEM).lower()}, DESKTOP = {str(DESKTOP).lower()}, JS = {str(JS).lower()}, DOM = {str(DOM).lower()}, CACHE = {str(CACHE).lower()}, EXT_PDF = {str(EXT_PDF).lower()}, NATIVE = {str(NATIVE).lower()};
-            static final boolean PDF_CHOOSER = {str(PDF_CHOOSER).lower()}, LOCAL = {str(LOCAL).lower()};
+            static final boolean PDF_CHOOSER = {str(PDF_CHOOSER).lower()}, LOCAL = {str(LOCAL).lower()}, HYBRID = {str(HYBRID).lower()};
+            static final String LOCAL_URL = {json.dumps(LOCAL_URL)};
             static final String SPINNER_COLOR = {json.dumps(SPINNER_COLOR)}, REFRESH_COLOR = {json.dumps(REFRESH_COLOR)}, LANG = {json.dumps(LANG)};
             static final float OVERLAY = {OVERLAY}f; static final int TIMEOUT = {TIMEOUT};
             static final String[] MENU_LABELS = {{{", ".join(json.dumps(l) for l, _ in MENU)}}}, MENU_URLS = {{{", ".join(json.dumps(u) for _, u in MENU)}}};
@@ -319,7 +321,7 @@ jobs:
             WebView web; SwipeRefreshLayout swipe; ImageView previousPage; Bitmap snapshot;
             boolean committed = false; android.widget.ProgressBar spinner; boolean backPending = false;
             android.window.OnBackInvokedCallback systemBack;
-            final Runnable timeoutCheck = () -> {{ if (!committed && web != null) {{ web.stopLoading(); revealPage(); web.loadDataWithBaseURL(null, OFFLINE, "text/html", "utf-8", null); }} }};
+            final Runnable timeoutCheck = () -> {{ if (!committed && web != null) {{ web.stopLoading(); revealPage(); if (HYBRID) web.loadUrl(LOCAL_URL); else web.loadDataWithBaseURL(null, OFFLINE, "text/html", "utf-8", null); }} }};
             java.util.Map<String, String> headers() {{ java.util.HashMap<String, String> h = new java.util.HashMap<>(); if (!LANG.isEmpty()) h.put("Accept-Language", LANG + ",en;q=0.5"); return h; }}
             void go(String u) {{ web.loadUrl(u, headers()); }}
             {FLAGS}
@@ -630,7 +632,7 @@ jobs:
                 @Override public void onPageCommitVisible(WebView v, String u) {{ revealPage(); }}
                 @Override public void onPageFinished(WebView v, String u) {{ if (!DESKTOP) v.evaluateJavascript(VIEWPORT, null); if (NOTIFY) v.evaluateJavascript(BRIDGE, null); revealPage(); }}
                 @Override public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError error) {{
-                  if (r.isForMainFrame()) {{ revealPage(); v.loadDataWithBaseURL(null, OFFLINE, "text/html", "utf-8", null); }}
+                  if (r.isForMainFrame()) {{ revealPage(); if (HYBRID) v.loadUrl(LOCAL_URL); else v.loadDataWithBaseURL(null, OFFLINE, "text/html", "utf-8", null); }}
                 }}
               }});
               if (b != null && web.restoreState(b) != null) {{}} else go(START);
